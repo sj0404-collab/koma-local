@@ -1,0 +1,8 @@
+koma-web.html
+apk/app/src/main/assets/koma-web.html
+apk/build/
+apk/app/build/
+apk/.gradle/
+.gradle/
+*.apk
+__pycache__/
