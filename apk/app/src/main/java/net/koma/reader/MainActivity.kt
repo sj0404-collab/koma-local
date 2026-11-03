@@ -63,6 +63,12 @@ class MainActivity : android.app.Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Отладка WebView по adb: нужна живой студии в GitHub (эмулятор на раннере
+        // управляет страницей через DevTools). Снаружи это недоступно: сокет
+        // `webview_devtools_remote` открыт только локально для adb, сеть не нужна,
+        // разрешение INTERNET в манифесте не появляется.
+        WebView.setWebContentsDebuggingEnabled(true)
+
         // Голос: в WebView нет Web Speech API, поэтому озвучку даёт системный
         // движок Android через мост KomaSpeech.
         speech = KomaSpeechBridge(this) { web }
