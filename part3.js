@@ -211,10 +211,19 @@ function fixLookalikesForced(raw) {
  */
 function trimJunkEdges(text) {
   const tokens = String(text || '').split(' ').filter(Boolean);
+  // «НО...», «ДА!», «НЕ…» — настоящие слова, а не звуковой эффект. Правило
+  // «≤2 буквы и ≥2 знака = мусор» выкидывало их с края реплики, и хвост
+  // пропадал: эталон «ГОТОВО… НЕ ЗНАЮ, ПОМОЖЕТ ЛИ ЭТО, НО…» читался без «НО…»
+  // (замер 3.11, tools/measure.py). Теперь известные короткие слова не трогаем.
+  const REAL_SHORT = new Set(['НО', 'ДА', 'НЕ', 'Я', 'ОН', 'ОНА', 'МЫ', 'ВЫ', 'ТЫ',
+    'И', 'А', 'У', 'О', 'ЖЕ', 'ЛИ', 'В', 'НА', 'С', 'К', 'ПО', 'ЗА', 'ТО', 'ТАК',
+    'ВОТ', 'ВСЁ', 'ЕЩЁ', 'ДЛЯ', 'ИЗ', 'ОТ', 'ДО', 'ПРИ', 'ПРО', 'ЧТО', 'КАК', 'ЭТО']);
   const junk = (t) => {
     const letters = (t.match(/\p{L}/gu) || []).length;
     const marks = (t.match(/[^\p{L}\p{N}]/gu) || []).length;
-    return letters <= 2 && marks >= 2;
+    if (!(letters <= 2 && marks >= 2)) return false;
+    const core = (t.match(/\p{L}/gu) || []).join('').toUpperCase();
+    return !REAL_SHORT.has(core);
   };
   while (tokens.length > 1 && junk(tokens[0])) tokens.shift();
   while (tokens.length > 1 && junk(tokens[tokens.length - 1])) tokens.pop();
@@ -531,10 +540,41 @@ const Words = {
     }
     return false;
   },
+  /**
+   * Очень короткое слово (2–3 буквы), которого нет в словаре: «БЬ» вместо «БЫ»
+   * (эталон «ДА, ПОЧЕМУ БЫ И НЕТ?», замер 3.11). Раньше такие слова вообще не
+   * правились, и голос читал «почему бь». Меняем, только если кандидат
+   * ЕДИНСТВЕННЫЙ и он из частых — угадывать вслепую нельзя.
+   */
+  SHORT_OK: new Set(['но', 'да', 'не', 'же', 'ли', 'и', 'а', 'у', 'о', 'он', 'мы',
+    'вы', 'ты', 'я', 'в', 'на', 'с', 'к', 'по', 'за', 'то', 'так', 'вот', 'всё',
+    'ещё', 'для', 'из', 'от', 'до', 'при', 'про', 'что', 'как', 'это', 'уж', 'ах',
+    'ох', 'эх', 'ей', 'их', 'им', 'её', 'его', 'ну', 'ва', 'их', 'кто', 'чем']),
+  fixShortWord(word) {
+    const low = String(word).toLowerCase();
+    if (low.length < 2 || low.length > 3) return null;
+    if (this.SHORT_OK.has(low)) return null;             // настоящее короткое слово
+    const own = this.rank.has(low) ? this.rank.get(low) : Infinity;
+    if (own <= 2000) return null;                        // само по себе не редкое
+    // Правим ТОЛЬКО один случай, и он узкий: мягкий или твёрдый знак там, где
+    // должен стоять гласный. «БЬ» → «БЫ» (частота 18 482 → 28). Общий перебор
+    // «похожих частых слов» не годится: он превращал «ВС» (это обрезанное
+    // «ВСЁ») в «ВЫ», и смысл реплики менялся — замер 3.11 это поймал.
+    const last = low[low.length - 1];
+    if (last !== 'ь' && last !== 'ъ') return null;
+    const cand = low.slice(0, -1) + 'ы';
+    const r = this.rank.get(cand);
+    if (r === undefined || r > 1000) return null;
+    if (!(own / Math.max(r, 1) >= 10)) return null;
+    return this.sameCase(word, cand);
+  },
   correctWord(word) {
     if (!this.ready) return word;
     const low = word.toLowerCase();
-    if (low.length < 4) return word;
+    if (low.length < 4) {
+      const short = this.fixShortWord(word);
+      return short || word;
+    }
     // «ЬЫТЬ» со скриншота 21:20: мягкий знак прочитан вместо «Б». Слово не
     // начинается с «ь» ни в одном настоящем слове, поэтому замена проверяемая.
     if (low[0] === 'ь' || low[0] === 'ъ') {
@@ -787,6 +827,20 @@ const Words = {
   },
 
   /** Починка реплики: слова по словарю + висячий дефис в конце. */
+  /**
+   * Скобка, прилипшая к слову, — это не часть реплики, а обрывок рамки облачка:
+   * «ОНА) ВС ШЕПЧЕТ» на замере 3.11. Снимаем закрывающую скобку, если слово
+   * без неё есть в словаре; настоящие скобки в тексте так не задеваются.
+   */
+  stripStrayBrackets(t) {
+    if (!this.ready) return t;
+    return String(t).split(' ').map((w) => {
+      const m = /^([А-Яа-яЁё][А-Яа-яЁё-]*)[)\]}]+$/.exec(w);
+      if (!m) return w;
+      const core = m[1].toLowerCase();
+      return (this.inDict(core) || this.isKnown(core)) ? m[1] : w;
+    }).join(' ');
+  },
   finish(text, keepAll) {
     let t = joinHyphens(String(text || ''));
     // Дефис, прочитанный как точка: «ЕЁ ВЕ. ЛИЧЕСТВО» → «ЕЁ ВЕЛИЧЕСТВО».
@@ -806,6 +860,9 @@ const Words = {
       // это шум чтеца, а не английский звук. Настоящие звуки («BANG», «KO») не
       // трогаем: у них регистр ровный.
       if (!hasCyr && /[a-z][A-Z]|[A-Z][a-z]/.test(t) && /[A-Za-z]{4,}/.test(t)) return '';
+      // Скобка снимается ЗДЕСЬ, после перевода латиницы: «OHA)» сначала
+      // становится «ОНА)», и только потом видно, что «)» — обрывок рамки.
+      t = this.stripStrayBrackets(t);
       if (hasCyr) {
         t = t.split(' ').filter(w => {
           if (!this.hasLatin(w)) return true;
@@ -2054,6 +2111,88 @@ async function refineBrokenWords(crop, text, R) {
   return out;
 }
 
+
+
+/**
+ * Обрезанный хвост строки: чтец получил кроп, в котором последнего слова нет.
+ *
+ * Замер 3.11, строка «ОНА ВСЁ ЕЩЁ ШЕПЧЕТ»: детектор дал рамку только на «ВСЁ»,
+ * и в реплике осталось «ОНА ВС ШЕПЧЕТ» — слово «ЕЩЁ» пропало из чтения.
+ * Признак обрезки виден в самом тексте: последнее «слово» без единой гласной
+ * («ВС») по-русски словом быть не может. Тогда смотрим вправо от рамки: если
+ * там есть чернила (буквы продолжаются), расширяем кроп и читаем заново.
+ * Принимаем только вариант, в котором слов стало больше.
+ */
+async function extendCutTail(canvas, ln, text, wide, R) {
+  if (!wide) return text;
+  const ws = String(text).match(/[А-Яа-яЁё]+/g) || [];
+  if (!ws.length) return text;
+  if (/[аеёиоуыэюя]/i.test(ws[ws.length - 1])) return text;      // гласная есть — целое
+  const h = Math.max(4, ln.bottom - ln.top);
+  const x0 = Math.round(ln.right);
+  const x1 = Math.min(canvas.width - 1, Math.round(ln.right + h * 4));
+  if (x1 - x0 < 3) return text;
+  const w = x1 - x0, hh = Math.max(1, Math.round(h));
+  const strip = makeCanvas(w, hh);
+  strip.getContext('2d', { willReadFrequently: true })
+    .drawImage(canvas, x0, ln.top, w, hh, 0, 0, w, hh);
+  const cols = wordColumns(strip, R);                            // островки чернил справа
+  if (!cols.length) return text;
+  const pad = Math.max(2, Math.round(h * 0.25));
+  const right = Math.min(canvas.width - 1, x0 + cols[cols.length - 1][1] + pad);
+  const cw = Math.max(1, right - ln.left);
+  const crop = makeCanvas(cw, hh);
+  crop.getContext('2d', { willReadFrequently: true })
+    .drawImage(canvas, ln.left, ln.top, cw, hh, 0, 0, cw, hh);
+  let cand = '';
+  try { [cand] = await decodeCrop(padCanvas(crop, 0.15)); } catch (e) { return text; }
+  await yieldUI();
+  if (!cand) return text;
+  const cnt = (t) => (String(t).match(/[\p{L}\p{N}]{2,}/gu) || []).length;
+  if (cnt(cand) > cnt(text)) return cand;
+  return text;
+}
+
+/**
+ * Слово, которое чтец «проглотил» внутри строки.
+ *
+ * На замере 3.11 строка «ОНА ВСЁ ЕЩЁ ШЕПЧЕТ» пришла как «ОНА ВС ШЕПЧЕТ»: в
+ * реплике из четырёх слов осталось три, и голос прочитал не то, что написано.
+ * Кроп этой строки содержит ДВА островка «чернил» («ВСЁ» и «ЕЩЁ»), а текста
+ * модель отдала на одно слово. Здесь такие строки перечитываются другими
+ * подготовками, и вариант принимается только если он, во-первых, даёт ровно
+ * столько слов, сколько островков, и во-вторых, все слова в нём настоящие.
+ * Ничего не «дописываем» от себя: не подтвердилось — строка остаётся как была.
+ */
+async function revealLostWords(crop, text, R) {
+  let boxes = [];
+  try { boxes = wordColumns(crop, R); } catch (e) { return text; }
+  if (boxes.length < 2) return text;
+  const count = (t) => (String(t).match(/[\p{L}\p{N}]{2,}/gu) || []).length;
+  const got = count(text);
+  if (got >= boxes.length) return text;               // догонять нечего
+  if (boxes.length - got > 3) return text;            // разметка грубая — не рискуем
+  const known = (t) => {
+    const ws = (String(t).match(/[А-Яа-яЁё]{2,}/g) || []).map(w => w.toLowerCase());
+    if (!ws.length) return false;
+    return ws.every(w => Words.isKnown(w) || Words.isPlausible(w));
+  };
+  const tries = [
+    ['pad15', () => padCanvas(crop, 0.15)],
+    ['up2', () => upscaleCanvas(crop, 2)],
+    ['contrast', () => contrastCanvas(crop)],
+  ];
+  let best = text;
+  for (const [, mk] of tries) {
+    let cand = '';
+    try { [cand] = await decodeCrop(mk()); } catch (e) { continue; }
+    await yieldUI();
+    if (!cand) continue;
+    if (count(cand) === boxes.length && known(cand) && count(cand) > count(best)) best = cand;
+  }
+  return best;
+}
+
 /** Варианты распознавания одного слова; возвращает первое настоящее слово. */
 async function bestWordVariant(wordCrop, original, R) {
   const len = Array.from(original).length;
@@ -2732,6 +2871,16 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
           .drawImage(src, ln.left, ln.top, ln.right - ln.left, ln.bottom - ln.top, 0, 0, crop.width, crop.height);
         const fixed = await refineBrokenWords(crop, text, R);
         if (fixed !== text && textScore(fixed, conf) > textScore(text, conf)) text = fixed;
+        // Слово, которое чтец проглотил целиком («ВСЁ ЕЩЁ» → «ВС»), догоняем
+        // отдельно: словарная правка такое не видит — слово-то «настоящее».
+        const tail = await extendCutTail(src, ln, text, wide, R);
+        if (tail !== text) text = tail;
+        const full = await revealLostWords(crop, text, R);
+        if (full !== text) {
+          const wordsBefore = (text.match(/[\p{L}\p{N}]{2,}/gu) || []).length;
+          const wordsAfter = (full.match(/[\p{L}\p{N}]{2,}/gu) || []).length;
+          if (wordsAfter > wordsBefore) text = full;
+        }
       }
       if (text.trim() && conf > R.minConfidence) {
         items.push({
