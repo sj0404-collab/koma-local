@@ -2,6 +2,7 @@
 /* ───────────────────────── 4. Правила (тот же файл, что у АПК) ───────────────────────── */
 const DEFAULT_RULES = {
   version: 'web-1',
+  scrollSpeed: 1,
   inkLowPercentile: 0.02, inkHighPercentile: 0.98, inkFlatSpread: 10,
   inkCoefficient: 0.45, inkMin: 40, inkMax: 235, binarizeFallback: 110,
   inkTileRows: 4, inkLevels: 1,
@@ -113,6 +114,8 @@ function sanitizeRules(r, overrides) {
   num('bandsMax', 1, 32); num('wholeThreshold', .3, 1); num('bubbleGap', .05, 3);
   num('mergeHeightRatio', 1.05, 6); num('speechRate', 0, 3); num('autoScrollStep', .05, .9);
   num('semiManualSettleMs', 0, 5000);
+  // Скорость прокрутки — отдельно от скорости голоса: это про движение ленты.
+  num('scrollSpeed', .25, 2);
   R.detRetry = R.detRetry !== false;                       // повтор детектора при 0 боксов
   R.largeText = R.largeText !== false;
   R.decodeVariants = R.decodeVariants !== false;

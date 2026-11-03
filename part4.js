@@ -776,7 +776,7 @@ const Reader = {
       if (rel > viewH * 0.08 && rel < viewH * 0.8) return false;
       const target = Math.max(0, abs - viewH * 0.22);
       if (Math.abs(target - sc.scrollTop) < 24) return false;
-      SMOOTH.to(target, 240);            // один твин на всех, без спора за ленту
+      SMOOTH.glide(target);              // один твин на всех, время — по дистанции
       return true;
     } catch (e) { return false; }
   },
@@ -790,7 +790,7 @@ const Reader = {
     const h = wrap.getBoundingClientRect().height || ((this.pageRect(i) || {}).height || 0);
     if (!h) return false;
     const target = Math.max(0, (wrap.offsetTop || 0) + b.top * h);
-    if (animate) SMOOTH.to(target, 260);
+    if (animate) SMOOTH.glide(target);
     else { SMOOTH.stop(); sc.scrollTop = target; }
     return true;
   },
@@ -1173,6 +1173,28 @@ const nowMs = () => (typeof performance !== 'undefined' && performance.now) ? pe
  */
 const SMOOTH = {
   _raf: 0, _to: 0, _wait: [],
+  /**
+   * Скорость прокрутки (0,25…2). Раньше длительность была ФИКСИРОВАННОЙ
+   * (220–260 мс) на любую дистанцию: сдвиг на 30 px и переход на следующую
+   * страницу в вебтуне (несколько экранов) ехали одинаково быстро, и переход
+   * выглядел как резкий перескок через страницы (телефон 17:48). Теперь время
+   * пропорционально дистанции и делится на скорость.
+   */
+  speed: 1,
+  msFor(delta) {
+    const px = Math.abs(delta || 0);
+    // 1,2 px/мс ≈ 1200 px/с при 1×. Скорость подобрана так, чтобы даже на 1×
+    // кадр не перескакивал больше трети экрана: при 2,2 px/мс переход через
+    // страницу шёл рывками по ~70 px за кадр — это и видно как «прыжок».
+    const base = px / 1.2;
+    return clamp(base / Math.max(0.05, this.speed || 1), 200, 3500);
+  },
+  /** Плавно доехать до y: время считается по дистанции и скорости. */
+  glide(y) {
+    const sc = $('#strip');
+    if (!sc) return false;
+    return this.to(y, this.msFor(Math.round(y) - Math.round(sc.scrollTop || 0)));
+  },
   /** Кадр: в браузере rAF, в тестах и старом WebView — таймер. */
   _raf2(fn) {
     if (typeof RAF === 'function') return RAF(fn);
@@ -1367,6 +1389,31 @@ const TTS = {
     r.value = +(localStorage.getItem('koma.rate') || (RULES.speechRate || 1));
     this.rate = +r.value;
     r.oninput = () => { this.rate = +r.value; localStorage.setItem('koma.rate', r.value); };
+
+    // Скорость ПРОКРУТКИ: отдельный ползунок, отдельная память. Значение из
+    // правил главнее локальной памяти — правила приезжают плагином.
+    const sc = $('#rngScroll');
+    if (sc) {
+      const saved = Number(RULES.scrollSpeed) || +(localStorage.getItem('koma.scroll') || 1) || 1;
+      SMOOTH.speed = clamp(saved, 0.25, 2);
+      sc.value = String(SMOOTH.speed);
+      const hint = $('#scrollSpeedHint');
+      const label = () => {
+        if (hint) {
+          hint.textContent = SMOOTH.speed <= 0.3
+            ? SMOOTH.speed.toFixed(2).replace('.', ',') + '× — самое медленное, без рывков'
+            : SMOOTH.speed.toFixed(2).replace(/\.00$/, '').replace('.', ',') + '× — прокрутка к реплике';
+        }
+      };
+      label();
+      sc.oninput = () => {
+        SMOOTH.speed = clamp(+sc.value || 1, 0.25, 2);
+        localStorage.setItem('koma.scroll', String(SMOOTH.speed));
+        RULES.scrollSpeed = SMOOTH.speed;
+        label();
+        DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) }).catch(() => {});
+      };
+    }
   },
   stop() {
     this.stopped = true; this.speaking = false; this.queue = [];
@@ -1428,7 +1475,7 @@ const TTS = {
     const want = sr.top + sr.height * 0.3;               // реплику — в верхнюю треть
     // Тот же единственный твин: followLine больше не тянет ленту отдельно от
     // перехода к следующей полосе.
-    SMOOTH.to(Math.max(0, sc.scrollTop + top - want), 220);
+    SMOOTH.glide(Math.max(0, sc.scrollTop + top - want));
   },
   /**
    * Chrome/WebView разрешает озвучку только «из жеста»: если между нажатием и
@@ -1848,6 +1895,10 @@ const TTS = {
           const un = Reader.unspokenInBand();
           if (un.length) {
             Reader.scrollToLineIfNeeded(next, un[0]);
+            // Ждём остановки ленты: иначе голос начинал реплику, пока страница
+            // ещё ехала, и переход на следующую страницу вебтуна «прыгал».
+            await SMOOTH.done();
+            Reader.page = next;
             return this.readQueue(un);
           }
           const restNext = Reader.unspokenPage();
