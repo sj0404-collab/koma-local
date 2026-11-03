@@ -592,6 +592,43 @@ function bindUI() {
       $('#btnRescan').disabled = false;
     }
   };
+  // ── Сброс состояния: «Забыть текст этой книги» и «Сбросить у всех книг» ──
+  // Раньше распознанный текст и отметки «прочитано» жили вечно: у книги
+  // оставался старый список реплик, и на новой сборке человек видел текст,
+  // которого на странице нет. Теперь это можно стереть руками, не переустанавливая.
+  const forgetOf = async (id) => {
+    const keys = (await DB.all('kv') || []).filter(r => typeof r.k === 'string'
+      && (r.k === 'buf:' + id + ':' || r.k.startsWith('buf:' + id + ':'))
+      || (typeof r.k === 'string' && r.k === 'spoken:' + id));
+    for (const r of keys) await DB.del('kv', r.k);
+    return keys.length;
+  };
+  const forgetCurrent = async () => {
+    const book = Reader.book;
+    if (!book || !book.id) { toast('Книга не открыта'); return; }
+    const n = await forgetOf(book.id);
+    Reader.regions.clear();
+    Reader.bandCache.clear();
+    if (typeof Reader.spoken === 'object' && Reader.spoken.clear) Reader.spoken.clear();
+    Reader.spokenDirty = true;
+    Reader.paintAllFrames();
+    renderTextSheet();
+    toast('Текст книги забыт: убрано записей ' + n + '. Распознаем заново.', 4000);
+  };
+  const forgetEverything = async () => {
+    const rows = (await DB.all('kv') || []).filter(r => typeof r.k === 'string'
+      && (r.k.startsWith('buf:') || r.k.startsWith('spoken:')));
+    for (const r of rows) await DB.del('kv', r.k);
+    Reader.regions.clear();
+    Reader.bandCache.clear();
+    if (typeof Reader.spoken === 'object' && Reader.spoken.clear) Reader.spoken.clear();
+    Reader.paintAllFrames();
+    renderTextSheet();
+    toast('Сброшено у всех книг: записей ' + rows.length, 4000);
+  };
+  if ($('#btnForgetBook')) $('#btnForgetBook').onclick = () => { forgetCurrent().catch(e => toast('Не удалось: ' + e.message)); };
+  if ($('#btnForgetAll')) $('#btnForgetAll').onclick = () => { forgetEverything().catch(e => toast('Не удалось: ' + e.message)); };
+
   $('#btnSpeakPage').onclick = async () => {
     TTS.prime();                        // «Прочитать» в шторке — тот же жест
     const i = (Reader.textPage ?? Reader.page);

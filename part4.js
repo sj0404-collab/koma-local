@@ -54,7 +54,9 @@ const Reader = {
   syncSub() {
     const modeText = (this.mode === 'vertical' ? 'Вертикально' : this.mode === 'rtl' ? 'Страницы' : 'Страницы')
       + ' · ' + (this.dir === 'rtl' ? '← справа налево' : 'слева направо →');
-    $('#rSub').textContent = `KOMA · веб · ${this.page + 1} из ${this.pages.length} · ${modeText}`;
+    // Версию печатаем в подзаголовке: раньше по скриншоту нельзя было понять,
+    // какая сборка у человека, и мы спорили о починках, которых в его АПК не было.
+    $('#rSub').textContent = `KOMA · веб ${VERSION} · ${this.page + 1} из ${this.pages.length} · ${modeText}`;
     $('#pageNum').textContent = String(this.page + 1);
   },
 

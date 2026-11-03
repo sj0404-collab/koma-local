@@ -483,6 +483,12 @@
       <button class="btn" id="btnSpeakPage">Прочитать</button>
     </div>
     <div class="row" style="gap:8px;margin-top:8px">
+      <!-- Состояние книги не должно быть вечным: старый распознанный текст и
+           отметки «прочитано» раньше сбрасывались только переустановкой. -->
+      <button class="btn" id="btnForgetBook" style="flex:1">Забыть текст этой книги</button>
+      <button class="btn" id="btnForgetAll" style="flex:1">Сбросить у всех книг</button>
+    </div>
+    <div class="row" style="gap:8px;margin-top:8px">
       <button class="btn" id="btnLensSend">🔍 Открыть в Google Lens</button>
       <button class="btn" id="btnLensPaste">Вставить текст из Lens</button>
     </div>
