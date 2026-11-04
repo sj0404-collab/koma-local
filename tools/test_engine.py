@@ -12,6 +12,13 @@ with sync_playwright() as pw:
       window.KomaOcr = {
         available: () => true,
         status: () => JSON.stringify({ ready: true, engine: 'native', engines: ['auto','rec','eslav','r3','r4'] }),
+        probeAsync: (b64, rules, cbId) => {
+          setTimeout(() => window.__komaOcrEvent(cbId, 'done', JSON.stringify({ ok: true, boxes: 3, engines: [
+            { engine: 'rec', lines: 8, of: 8, words: 20, knownShare: 0.85, ms: 1200, samples: [] },
+            { engine: 'eslav', lines: 8, of: 8, words: 18, knownShare: 0.52, ms: 400, samples: [] },
+            { engine: 'r3', lines: 2, of: 8, words: 4, knownShare: 0.05, ms: 350, samples: [] },
+          ] })), 10);
+        },
         recognizeAsync: (b64, rules, cbId) => {
           window.__rules.push(JSON.parse(rules || '{}').engine);
           setTimeout(() => window.__komaOcrEvent(cbId, 'done', JSON.stringify({ ok: true, items: [], ms: 1 })), 5);
@@ -63,6 +70,15 @@ with sync_playwright() as pw:
     p.wait_for_timeout(1200)
     a2 = p.evaluate("() => ({eng: Reader.engine, def: ReadDefaults.v.engine})")
     print('А после смены умолчания:', a2)
+    # проверка чтецов на странице: кнопка → таблица
+    p.evaluate("() => { openSheet('sheetSettings'); syncSettingsUI(); }")
+    p.wait_for_timeout(400)
+    p.click('#btnProbe')
+    p.wait_for_timeout(1200)
+    probe = p.evaluate("() => (document.querySelector('#engProbe') || {}).textContent || ''")
+    print('таблица проверки:', probe.replace('\n', ' ')[:150])
+    probe_ok = '85' in probe and 'rec' in probe
+    print('проверка чтецов:', 'ок' if probe_ok else 'ПЛОХО')
     ok = (st['eng'] == 'r3' and st['saved'] == 'r3' and sent and sent[0] == 'r3'
           and bb['eng'] == 'auto' and a2['eng'] == 'r3' and a2['def'] == 'eslav')
     print('чтец:', 'ок' if ok else 'ПЛОХО')

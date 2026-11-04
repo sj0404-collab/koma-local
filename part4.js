@@ -1958,7 +1958,18 @@ const TTS = {
         await Reader.scanCurrent(false, det);        // детекция уже есть — второй раз не гоняем
       }
     }
-    const lines = fromStart ? Reader.visibleLines() : Reader.unspokenInBand();
+    let lines = fromStart ? Reader.visibleLines() : Reader.unspokenInBand();
+    // Если в полосе экрана текста нет, а на СТРАНИЦЕ он есть — читаем страницу
+    // с начала, а не упираемся в тупик. Требование с телефона 21:54: на
+    // вебтуне видно облачко с «УЖЕ ... ЧИНАТЬ ...», а приложение отвечало
+    // «на этой полосе нет распознанного текста».
+    if (!lines.length) {
+      const data = Reader.regions.get(i);
+      const all = (data && data.lines) || [];
+      const fresh = all.filter(l => !Reader.spoken.has(l.key || (l.page + '|' + l.text)));
+      if (fresh.length) lines = fresh;
+      else if (all.length && fromStart) lines = all;
+    }
     if (!lines.length && Reader.visibleLines().length) {
       // На этой полосе всё прочитано — переходим к следующему куску.
       return this.advanceReading();

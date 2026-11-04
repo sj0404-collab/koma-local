@@ -768,7 +768,29 @@ class OcrEngine(private val modelsDir: File) {
     private fun pickBetter(a: Pair<String, Double>, b: Pair<String, Double>?): Pair<String, Double> {
         if (b == null || b.first.isBlank()) return a
         if (a.first.isBlank()) return b
-        return if (vocabScore(b.first) > vocabScore(a.first)) b else a
+        // 1.0.23: сравниваем не «сколько всего» словарных букв, а их ДОЛЮ.
+        // Раньше длинный мусор побеждал короткое верное чтение: у rec на каждой
+        // строке букв больше, и он выигрывал даже когда половина — абракадабра.
+        // Теперь смотрим долю настоящих слов, при равной доле — кто длиннее.
+        val sa = vocabRatio(a.first)
+        val sb = vocabRatio(b.first)
+        val la = a.first.length
+        val lb = b.first.length
+        val bWins = if (Math.abs(sa - sb) > 0.15) sb > sa else (sb > sa || (sb == sa && lb > la))
+        return if (bWins) b else a
+    }
+
+    /** Доля слов строки, которые есть в словаре (0..1). */
+    private fun vocabRatio(text: String): Double {
+        var words = 0
+        var known = 0
+        for (w in text.split(' ', '\n', '\t')) {
+            val k = w.trim().trim('.', ',', '!', '?', '…', '—', '«', '»', '"', ':', ';', '%').uppercase()
+            if (k.length < 3) continue
+            words++
+            if (vocab.contains(k)) known++
+        }
+        return if (words == 0) 0.0 else known.toDouble() / words
     }
 
     // ── 4. Распознавание кропа строки ───────────────────────────────────────
@@ -931,6 +953,75 @@ class OcrEngine(private val modelsDir: File) {
                 }
                 return sb.toString() to (if (count > 0) score / count else 0.0)
             }
+        }
+    }
+
+    /**
+     * Проверить ВСЕХ чтецов на настоящем кадре (1.0.23).
+     *
+     * Зачем: замер на заранее нарезанных строках с телефоном не сошёлся — там
+     * кропы другие. Правильная проверка делается на своей странице: один и тот
+     * же детектор, та же резка, разные чтецы. Возвращаем по каждому: сколько
+     * строк прочитал, сколько слов похоже на настоящие (по vocab-ru) и время.
+     */
+    fun probe(base64Jpeg: String, rulesJson: String?): JSONObject {
+        val o = JSONObject()
+        if (!load()) return o.put("ok", false).put("error", error ?: "движок не готов")
+        val bytes = Base64.decode(base64Jpeg, Base64.DEFAULT)
+        val page = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            ?: return o.put("ok", false).put("error", "кадр не декодировался")
+        val rules = Rules.from(rulesJson)
+        return try {
+            val boxes = detect(page, rules.pageSide, rules.detRetry)
+            val crops = ArrayList<Bitmap>()
+            outer@ for (b in boxes) {
+                for (ln in textLines(page, b, rules).ifEmpty { listOf(b) }) {
+                    if (crops.size >= 24) break@outer
+                    val lx0 = max(0, ln[0] - 2); val ly0 = ln[1]
+                    val lx1 = min(page.width, ln[2] + 2); val ly1 = ln[3]
+                    if (lx1 - lx0 < 4 || ly1 - ly0 < 4) continue
+                    try { crops.add(Bitmap.createBitmap(page, lx0, ly0, lx1 - lx0, ly1 - ly0)) } catch (e: Throwable) { }
+                }
+            }
+            val arr = JSONArray()
+            val list = LinkedHashMap<String, OrtSession?>()
+            list["rec"] = rec
+            for ((k, sess) in small) list[k] = sess
+            for ((name, sess) in list) {
+                if (sess == null) continue
+                val t0 = System.currentTimeMillis()
+                var withText = 0
+                var words = 0
+                var known = 0
+                val samples = ArrayList<String>()
+                for (crop in crops) {
+                    val pair = try {
+                        if (name == "rec") decode(crop, true) else decodeSmall(sess, crop)
+                    } catch (t: Throwable) { "" to 0.0 }
+                    val text = pair.first.trim()
+                    if (text.isEmpty()) continue
+                    withText++
+                    if (samples.size < 3) samples.add(text)
+                    for (w in text.uppercase().split(Regex("[^А-ЯЁA-Z]+"))) {
+                        if (w.length < 2) continue
+                        words++
+                        if (vocab.contains(w.replace('Ё', 'Е'))) known++
+                    }
+                }
+                arr.put(JSONObject()
+                    .put("engine", name)
+                    .put("lines", withText)
+                    .put("of", crops.size)
+                    .put("words", words)
+                    .put("knownShare", if (words > 0) known.toDouble() / words else 0.0)
+                    .put("ms", System.currentTimeMillis() - t0)
+                    .put("samples", JSONArray(samples)))
+            }
+            for (c in crops) c.recycle()
+            page.recycle()
+            o.put("ok", true).put("engines", arr).put("boxes", boxes.size)
+        } catch (t: Throwable) {
+            o.put("ok", false).put("error", t.message ?: t.javaClass.simpleName)
         }
     }
 

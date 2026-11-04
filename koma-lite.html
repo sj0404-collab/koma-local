@@ -458,6 +458,8 @@
       <button class="chip" data-eng="r4">Стилевой Б (r4)</button>
     </div>
     <div class="hint" id="engHint" style="margin-top:6px"></div>
+    <button class="btn" id="btnProbe" style="margin-top:8px">Проверить чтецов на этой странице</button>
+    <div id="engProbe" class="kv" style="margin-top:8px"></div>
     <button class="btn" id="btnProfReset" style="margin-top:10px">Вернуть как по умолчанию</button>
 
     <div class="lbl" style="margin-top:22px">ПО УМОЛЧАНИЮ — ДЛЯ ВСЕХ ОСТАЛЬНЫХ КНИГ</div>
@@ -671,7 +673,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.71';
+const VERSION = 'v1.9.72';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -8323,7 +8325,18 @@ const TTS = {
         await Reader.scanCurrent(false, det);        // детекция уже есть — второй раз не гоняем
       }
     }
-    const lines = fromStart ? Reader.visibleLines() : Reader.unspokenInBand();
+    let lines = fromStart ? Reader.visibleLines() : Reader.unspokenInBand();
+    // Если в полосе экрана текста нет, а на СТРАНИЦЕ он есть — читаем страницу
+    // с начала, а не упираемся в тупик. Требование с телефона 21:54: на
+    // вебтуне видно облачко с «УЖЕ ... ЧИНАТЬ ...», а приложение отвечало
+    // «на этой полосе нет распознанного текста».
+    if (!lines.length) {
+      const data = Reader.regions.get(i);
+      const all = (data && data.lines) || [];
+      const fresh = all.filter(l => !Reader.spoken.has(l.key || (l.page + '|' + l.text)));
+      if (fresh.length) lines = fresh;
+      else if (all.length && fromStart) lines = all;
+    }
     if (!lines.length && Reader.visibleLines().length) {
       // На этой полосе всё прочитано — переходим к следующему куску.
       return this.advanceReading();
@@ -9902,6 +9915,54 @@ function bindUI() {
     await ReadDefaults.save();
     syncSettingsUI();
   };
+  /**
+   * Проверка чтецов на ЭТОЙ странице (1.0.23).
+   *
+   * Мой замер на нарезанных строках с телефоном не сошёлся — значит, мерить
+   * надо там, где читает человек. Кнопка отдаёт кадр нативному движку, он
+   * прогоняет всех чтецов по тем же строкам и возвращает: сколько строк
+   * прочитано, сколько слов похоже на настоящие (по словарю) и время.
+   */
+  if ($('#btnProbe')) $('#btnProbe').onclick = async () => {
+    const box = $('#engProbe');
+    const b = (typeof NativeOcr !== 'undefined') ? NativeOcr.bridge() : null;
+    if (!b || typeof b.probeAsync !== 'function') {
+      if (box) box.textContent = 'Проверка работает только в приложении: в браузере чтецы не переключаются.';
+      return;
+    }
+    const i = Reader.page;
+    const canvas = Reader.canvases && Reader.canvases[i];
+    if (!canvas) { toast('Страница ещё не готова — подождите', 3000); return; }
+    if (box) box.textContent = 'Считаю всех чтецов на этой странице…';
+    const cbId = 'p' + Date.now().toString(36);
+    const prev = window.__komaOcrEvent;
+    const done = new Promise((resolve) => {
+      window.__komaOcrEvent = (id, type, data) => {
+        if (id !== cbId) { if (typeof prev === 'function') prev(id, type, data); return; }
+        if (type === 'state') { if (box) box.textContent = 'Считаю… ' + data; return; }
+        if (type === 'done') { window.__komaOcrEvent = prev; let r = {}; try { r = JSON.parse(data || '{}'); } catch (e) {} resolve(r); }
+      };
+      try {
+        const b64 = canvas.toDataURL('image/jpeg', 0.92).split(',')[1];
+        b.probeAsync(b64, JSON.stringify({ pageSide: (typeof RULES !== 'undefined' && RULES.pageSide) || 1600 }), cbId);
+      } catch (e) { window.__komaOcrEvent = prev; resolve({ ok: false, error: String(e) }); }
+    });
+    const r = await done;
+    if (!box) return;
+    if (!r.ok) { box.innerHTML = '<span style="color:#ff9b9b">Не получилось: ' + String(r.error || '') + '</span>'; return; }
+    const rows = (r.engines || []).map(x => {
+      const pct = Math.round((x.knownShare || 0) * 100);
+      const good = pct >= 45 && x.lines > 0;
+      return `<tr><td>${ENG_NAMES[x.engine] || x.engine}</td><td>${x.lines}/${x.of}</td>`
+        + `<td style="color:${good ? '#8fe0b0' : '#ffb4b4'}">${pct} %</td>`
+        + `<td>${(x.ms / 1000).toFixed(1)} с</td></tr>`;
+    }).join('');
+    box.innerHTML = '<table style="width:100%;font-size:12px">'
+      + '<tr><th>чтец</th><th>строк</th><th>слов по словарю</th><th>время</th></tr>'
+      + rows + '</table><div class="hint" style="margin-top:6px">'
+      + 'Сравнивай «слов по словарю»: это доля прочитанных слов, которые есть в русском словаре. '
+      + 'Ниже 45 % — чтец на этой странице не годится.</div>';
+  };
   if ($('#btnProfReset')) $('#btnProfReset').onclick = async () => {
     if (!Reader.book) return;
     const D = ReadDefaults.v;
@@ -10014,8 +10075,11 @@ function renderEngHint() {
   h.innerHTML = 'Сейчас: <b>' + now + '</b>. ' + (nat
     ? 'Читает нативный движок приложения.'
     : 'В браузере чтец не переключается — он выбирается в приложении.')
-    + '<br>Замер по нарезкам строк (4.11): комикс — rec 73 %, eslav 71 %, r3 46 %, r4 47 %;'
-    + ' маньхуа — eslav 67 %, rec 54 %, r4 51 %, r3 48 %. Поэтому «авто» эти двое не выбирает.';
+    + '<br>Замер на настоящих страницах (детектор → резка на строки → чтец), доля найденных слов эталона:'
+    + ' манга — rec 78 %, eslav 44 %; маньхуа — rec 43 %, eslav 14 %; вебтун — rec 89 %, eslav 46 %;'
+    + ' комикс — eslav 19 %, rec 5 %; r3 и r4 — от 0 до 17 % на всём.'
+    + '<br>Мой прежний замер по нарезанным строкам с телефоном не сошёлся — верь кнопке ниже,'
+    + ' она мерит на твоей странице.';
 }
 
 function syncSettingsUI() {

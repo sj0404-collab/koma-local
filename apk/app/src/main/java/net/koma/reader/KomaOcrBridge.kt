@@ -180,6 +180,20 @@ class KomaOcrBridge(
         } catch (e: Throwable) { Pair(1, 1) }
     }
 
+    /**
+     * Проверить всех чтецов на этой странице (1.0.23). Ответ:
+     * `{ok, engines:[{engine,lines,of,words,knownShare,ms,samples}], boxes}`.
+     */
+    @JavascriptInterface
+    fun probeAsync(base64Jpeg: String, rulesJson: String, cbId: String) {
+        pool.execute {
+            val res = try { engine.probe(base64Jpeg, rulesJson) } catch (t: Throwable) {
+                JSONObject().put("ok", false).put("error", t.message ?: t.javaClass.simpleName)
+            }
+            emit(cbId, "done", res.toString())
+        }
+    }
+
     /** Проверка на синтетической странице: видно, что движок реально читает. */
     @JavascriptInterface
     fun selfTestAsync(cbId: String) {
