@@ -601,7 +601,9 @@ const Reader = {
       // позже первой чистки («*ь*.*о НЕ УВЕРЕН…» — эмулятор APKForge, 29.10).
       fresh = fresh
         .map(l => ({ ...l, text: trimJunkEdges(String(l.text || '')) }))
-        .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
+        .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2)
+        // Титул и «Глава 48» — не реплики: их не читаем и в шторке помечаем.
+        .filter(l => !isTitleOrMarker(l.text, l, 1));
       // Помечаем, на какой полосе нашлась реплика: в шторке видно, что
       // показано «на экране», а что распознано раньше с этой же страницы.
       const bandTop = band ? Math.round(band.y0) : 0;

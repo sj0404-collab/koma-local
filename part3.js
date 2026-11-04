@@ -822,6 +822,26 @@ function dropDuplicateReplicas(replicas) {
   return list.filter((_, i) => !drop.has(i));
 }
 
+/**
+ * Устойчивые обороты, которые словарь портит по одной букве (1.0.25).
+ *
+ * «СЛАВА БОГУ!» чтец читает как «СЛАБА», а словарь видит в этом настоящее
+ * слово («слаба») и оставляет как есть. «О ЧЕМ ТЫ?» — «ЧЕЛ» словарь не знает
+ * и чинит во что попало. Такие места надёжнее чинить целой фразой: список
+ * короткий и проверяется тестом (tools/test_lines.cjs). Скриншоты 4.11, 22:34.
+ */
+const FIXED_PHRASES = [
+  // \b в JS считается по латинице, поэтому кириллицу ограничиваем явно.
+  [/(^|[^\p{L}])СЛ[АО][БВ]А?(?=\s+БОГУ)/gu, '$1СЛАВА'],
+  [/(^|\s)О\s+ЧЕЛ\s+ТЫ(?=$|[\s!?.,…])/gu, '$1О ЧЕМ ТЫ'],
+  [/(^|\s)ПО\s+ТЕЛЕ\s+ФО(?=$|[\s!?.,…])/gu, '$1ПО ТЕЛЕФОН'],
+];
+function fixPhrases(text) {
+  let t = String(text || '');
+  for (const pair of FIXED_PHRASES) t = t.replace(pair[0], pair[1]);
+  return t;
+}
+
 function polishLineText(raw) {
   let text = String(raw || '').replace(/\u00AD/g, '-').replace(/\s+/g, ' ').trim();
   if (!text) return '';
@@ -849,6 +869,8 @@ function polishLineText(raw) {
   text = dropStuckFragments(text);
 
   text = fixCaseInCaps(text);
+  // Фразы чиним ПОСЛЕ слов: словарь уже успел испортить «СЛАВА» → «СЛАБА».
+  text = fixPhrases(text);
   return trimJunkEdges(text).trim();
 }
 
@@ -879,6 +901,30 @@ function fixLookalikesForced(raw, opts = {}) {
  * «~х~», «{\"а\"». Обычные кавычки и тире (««В БУДУЩЕМ», «— ДА») не трогаем:
  * у них знак один.
  */
+/**
+ * Титул и номер главы — не реплики (правка 1.0.25, скриншот 21:54).
+ *
+ * На вебтуне первая страница — титульная каллиграфия («Как прожить жизнь,
+ * будучи старшей сестрой тирана») и подпись «Глава 48». Приложение читало это
+ * вслух как реплику. Правила узкие, чтобы не съесть настоящий текст:
+ *  · «глава/том/часть/episode/chapter + число» — метка, не реплика;
+ *  · строка из одних цифр длиной 1–3 знака («48») — метка;
+ *  · крупный текст (детектор помечает его `large`) в самой верхней части
+ *    страницы И не похожий на реплику (нет знаков речи, больше двух слов) —
+ *    это титул.
+ */
+function isTitleOrMarker(text, line, pageHeight) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  if (/^(глава|том|часть|эпизод|chapter|episode|vol\.?|volume)\s*[№#]?\s*\d+\s*$/i.test(t)) return true;
+  if (/^\d{1,3}$/.test(t)) return true;
+  const large = !!(line && line.large);
+  const top = !!(line && Number.isFinite(line.top) && line.top < 0.18);
+  const words = (t.match(/\p{L}+/gu) || []).length;
+  if (large && top && words >= 3 && !/[!?…]/u.test(t)) return true;
+  return false;
+}
+
 function trimJunkEdges(text) {
   const tokens = String(text || '').split(' ').filter(Boolean);
   // «НО...», «ДА!», «НЕ…» — настоящие слова, а не звуковой эффект. Правило

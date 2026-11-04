@@ -674,7 +674,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.73';
+const VERSION = 'v1.9.74';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -1925,6 +1925,26 @@ function dropDuplicateReplicas(replicas) {
   return list.filter((_, i) => !drop.has(i));
 }
 
+/**
+ * Устойчивые обороты, которые словарь портит по одной букве (1.0.25).
+ *
+ * «СЛАВА БОГУ!» чтец читает как «СЛАБА», а словарь видит в этом настоящее
+ * слово («слаба») и оставляет как есть. «О ЧЕМ ТЫ?» — «ЧЕЛ» словарь не знает
+ * и чинит во что попало. Такие места надёжнее чинить целой фразой: список
+ * короткий и проверяется тестом (tools/test_lines.cjs). Скриншоты 4.11, 22:34.
+ */
+const FIXED_PHRASES = [
+  // \b в JS считается по латинице, поэтому кириллицу ограничиваем явно.
+  [/(^|[^\p{L}])СЛ[АО][БВ]А?(?=\s+БОГУ)/gu, '$1СЛАВА'],
+  [/(^|\s)О\s+ЧЕЛ\s+ТЫ(?=$|[\s!?.,…])/gu, '$1О ЧЕМ ТЫ'],
+  [/(^|\s)ПО\s+ТЕЛЕ\s+ФО(?=$|[\s!?.,…])/gu, '$1ПО ТЕЛЕФОН'],
+];
+function fixPhrases(text) {
+  let t = String(text || '');
+  for (const pair of FIXED_PHRASES) t = t.replace(pair[0], pair[1]);
+  return t;
+}
+
 function polishLineText(raw) {
   let text = String(raw || '').replace(/\u00AD/g, '-').replace(/\s+/g, ' ').trim();
   if (!text) return '';
@@ -1952,6 +1972,8 @@ function polishLineText(raw) {
   text = dropStuckFragments(text);
 
   text = fixCaseInCaps(text);
+  // Фразы чиним ПОСЛЕ слов: словарь уже успел испортить «СЛАВА» → «СЛАБА».
+  text = fixPhrases(text);
   return trimJunkEdges(text).trim();
 }
 
@@ -1982,6 +2004,30 @@ function fixLookalikesForced(raw, opts = {}) {
  * «~х~», «{\"а\"». Обычные кавычки и тире (««В БУДУЩЕМ», «— ДА») не трогаем:
  * у них знак один.
  */
+/**
+ * Титул и номер главы — не реплики (правка 1.0.25, скриншот 21:54).
+ *
+ * На вебтуне первая страница — титульная каллиграфия («Как прожить жизнь,
+ * будучи старшей сестрой тирана») и подпись «Глава 48». Приложение читало это
+ * вслух как реплику. Правила узкие, чтобы не съесть настоящий текст:
+ *  · «глава/том/часть/episode/chapter + число» — метка, не реплика;
+ *  · строка из одних цифр длиной 1–3 знака («48») — метка;
+ *  · крупный текст (детектор помечает его `large`) в самой верхней части
+ *    страницы И не похожий на реплику (нет знаков речи, больше двух слов) —
+ *    это титул.
+ */
+function isTitleOrMarker(text, line, pageHeight) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  if (/^(глава|том|часть|эпизод|chapter|episode|vol\.?|volume)\s*[№#]?\s*\d+\s*$/i.test(t)) return true;
+  if (/^\d{1,3}$/.test(t)) return true;
+  const large = !!(line && line.large);
+  const top = !!(line && Number.isFinite(line.top) && line.top < 0.18);
+  const words = (t.match(/\p{L}+/gu) || []).length;
+  if (large && top && words >= 3 && !/[!?…]/u.test(t)) return true;
+  return false;
+}
+
 function trimJunkEdges(text) {
   const tokens = String(text || '').split(' ').filter(Boolean);
   // «НО...», «ДА!», «НЕ…» — настоящие слова, а не звуковой эффект. Правило
@@ -6969,7 +7015,9 @@ const Reader = {
       // позже первой чистки («*ь*.*о НЕ УВЕРЕН…» — эмулятор APKForge, 29.10).
       fresh = fresh
         .map(l => ({ ...l, text: trimJunkEdges(String(l.text || '')) }))
-        .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
+        .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2)
+        // Титул и «Глава 48» — не реплики: их не читаем и в шторке помечаем.
+        .filter(l => !isTitleOrMarker(l.text, l, 1));
       // Помечаем, на какой полосе нашлась реплика: в шторке видно, что
       // показано «на экране», а что распознано раньше с этой же страницы.
       const bandTop = band ? Math.round(band.y0) : 0;
@@ -9979,18 +10027,29 @@ function bindUI() {
         + escapeHtml(String(r.error || '')) + '</span>';
       return;
     }
+    const win = bestOf(r);
     const rows = (r.engines || []).map(x => {
       const pct = Math.round((x.knownShare || 0) * 100);
-      const good = pct >= 45 && x.lines > 0;
-      return '<tr><td>' + (ENG_NAMES[x.engine] || x.engine) + '</td><td>' + x.lines + '/' + x.of + '</td>'
+      // Зелёным — лучший на этой странице. Раньше зелёным считалось «45 %»,
+      // а на манге с мелким шрифтом ни один чтец до 45 % не добирается
+      // (скриншот 22:34: rec 43 %, eslav 38 %) — таблица целиком краснела и
+      // выглядела как «ничего не работает». Порог оставлен только как ориентир.
+      const good = x === win || pct >= 45;
+      return '<tr' + (x === win ? ' style="font-weight:600"' : '') + '><td>' + (ENG_NAMES[x.engine] || x.engine) + '</td><td>' + x.lines + '/' + x.of + '</td>'
         + '<td style="color:' + (good ? '#8fe0b0' : '#ffb4b4') + '">' + pct + ' %</td>'
         + '<td>' + (x.ms / 1000).toFixed(1) + ' с</td></tr>';
     }).join('');
+    const winPct = Math.round(((win && win.knownShare) || 0) * 100);
+    const note = winPct >= 45
+      ? 'Жирным и зелёным — лучший чтец на этой странице. 45 % и выше — страница прочитана уверенно.'
+      : 'Жирным и зелёным — лучший из чтецов. ' + winPct + ' % ниже 45 %: страница мелкая или шумная, '
+        + 'и все чтецы на ней слабее обычного. Чтец всё равно выбирается лучший по замеру, '
+        + 'но текст на такой странице будет рваным — это видно по репликам ниже.';
     box.innerHTML = '<table style="width:100%;font-size:12px">'
       + '<tr><th>чтец</th><th>строк</th><th>слов по словарю</th><th>время</th></tr>'
       + rows + '</table><div class="hint" style="margin-top:6px">'
       + 'Слов по словарю — доля прочитанных слов, которые есть в русском словаре. '
-      + 'Ниже 45 % чтец на этой странице не годится.</div>';
+      + note + '</div>';
   };
   /** Применить чтеца к книге (запоминается у неё одной). */
   const applyEngine = async (eng, why, user) => {

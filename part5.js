@@ -738,18 +738,29 @@ function bindUI() {
         + escapeHtml(String(r.error || '')) + '</span>';
       return;
     }
+    const win = bestOf(r);
     const rows = (r.engines || []).map(x => {
       const pct = Math.round((x.knownShare || 0) * 100);
-      const good = pct >= 45 && x.lines > 0;
-      return '<tr><td>' + (ENG_NAMES[x.engine] || x.engine) + '</td><td>' + x.lines + '/' + x.of + '</td>'
+      // Зелёным — лучший на этой странице. Раньше зелёным считалось «45 %»,
+      // а на манге с мелким шрифтом ни один чтец до 45 % не добирается
+      // (скриншот 22:34: rec 43 %, eslav 38 %) — таблица целиком краснела и
+      // выглядела как «ничего не работает». Порог оставлен только как ориентир.
+      const good = x === win || pct >= 45;
+      return '<tr' + (x === win ? ' style="font-weight:600"' : '') + '><td>' + (ENG_NAMES[x.engine] || x.engine) + '</td><td>' + x.lines + '/' + x.of + '</td>'
         + '<td style="color:' + (good ? '#8fe0b0' : '#ffb4b4') + '">' + pct + ' %</td>'
         + '<td>' + (x.ms / 1000).toFixed(1) + ' с</td></tr>';
     }).join('');
+    const winPct = Math.round(((win && win.knownShare) || 0) * 100);
+    const note = winPct >= 45
+      ? 'Жирным и зелёным — лучший чтец на этой странице. 45 % и выше — страница прочитана уверенно.'
+      : 'Жирным и зелёным — лучший из чтецов. ' + winPct + ' % ниже 45 %: страница мелкая или шумная, '
+        + 'и все чтецы на ней слабее обычного. Чтец всё равно выбирается лучший по замеру, '
+        + 'но текст на такой странице будет рваным — это видно по репликам ниже.';
     box.innerHTML = '<table style="width:100%;font-size:12px">'
       + '<tr><th>чтец</th><th>строк</th><th>слов по словарю</th><th>время</th></tr>'
       + rows + '</table><div class="hint" style="margin-top:6px">'
       + 'Слов по словарю — доля прочитанных слов, которые есть в русском словаре. '
-      + 'Ниже 45 % чтец на этой странице не годится.</div>';
+      + note + '</div>';
   };
   /** Применить чтеца к книге (запоминается у неё одной). */
   const applyEngine = async (eng, why, user) => {

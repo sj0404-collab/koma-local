@@ -94,11 +94,13 @@ const body = [
   extractStmt('const SINGLE_TWINS ='),
   extractBlock('function cyrifySingleLetters(text)'),
   extractBlock('function trimJunkEdges(text)'),
+  PART3.slice(PART3.indexOf('const FIXED_PHRASES = ['), PART3.indexOf('function polishLineText(raw) {')),
+  extractBlock('function isTitleOrMarker(text, line, pageHeight)'),
   extractBlock('function fixCaseInCaps(text)'),
   extractBlock('function dropStuckFragments('),
   extractBlock('function median('),
   extractBlock('function glueSplitWords(text)'),
-  'module.exports = { polishLineText, mergeSplitTokens, spliceFragmentRuns, restoreCutTails, dropStuckFragments, dropDuplicateReplicas };',
+  'module.exports = { polishLineText, mergeSplitTokens, spliceFragmentRuns, restoreCutTails, dropStuckFragments, dropDuplicateReplicas, isTitleOrMarker };',
 ].join('\n');
 function extractLine(head) {
   const start = PART3.indexOf(head);
@@ -109,11 +111,16 @@ function extractLine(head) {
 
 const mod = { exports: {} };
 new Function('Words', 'module', 'console', body)(Words, mod, console);
-const { polishLineText } = mod.exports;
+const { polishLineText, isTitleOrMarker } = mod.exports;
 
 // Строки дословно со скриншотов телефона (v1.9.62, 4.11).
 // null — строку надо выбросить целиком (это не реплика, а мусор).
 const CASES = [
+  // ── 1.0.25: фразы и титул (скриншоты телефона 22:34) ──
+  ['СЛАБА БОГУ!', 'СЛАВА БОГУ!'],
+  ['СЛАВ БОГУ!', 'СЛАВА БОГУ!'],
+  ['О ЧЕЛ ТЫ?', 'О ЧЕМ ТЫ?'],
+  ['ПРОСТО КОГДА ТЫ ГОВОРИЛ ПО ТЕЛЕ ФО ХОРОШО.', 'ПРОСТО КОГДА ТЫ ГОВОРИЛ ПО ТЕЛЕФОН ХОРОШО.'],
   // ── с телефона, скриншоты 4.11 вечера (v1.9.63, нативный движок) ──
   ['Я БЫ ХОТЕЛА ПОЗ ДОРО ВА ТЬСЯ С НИМ.', 'Я БЫ ХОТЕЛА ПОЗДОРОВАТЬСЯ С НИМ.'],
   ['НЕ ВОЛ-ШВ НУ ЙСЯ.', 'НЕ ВОЛНУЙСЯ.'],
@@ -136,7 +143,7 @@ const CASES = [
   ['ЭЙ, МИЧИРУЯ ТУТ ПОДУМАЛ AW', 'ЭЙ, МИЧИРУЯ ТУТ ПОДУМАЛ'],
   ['2wb ЗНА4иТ ТЫМОЖЕШЬ', 'ЗНАЧИТ ТЫ МОЖЕШЬ'],
   ['АХ, НЕ ОТВЕТИЛА В LINE', 'АХ, НЕ ОТВЕТИЛА В LINE'],
-  ['СЛАВАвb БОГУ!', 'СЛАВ БОГУ!'],
+  ['СЛАВАвb БОГУ!', 'СЛАВА БОГУ!'],
   ['ДУМАЮ МНЕ ПРИС НИТС9 КОШМАР.', 'ДУМАЮ МНЕ ПРИСНИТСЯ КОШМАР.'],
 ];
 
@@ -186,5 +193,25 @@ for (const [input, why] of KNOWN) {
   console.log('  знаю ' + '  ' + JSON.stringify(input) + ' → ' + JSON.stringify(polishLineText(input)) + '   (' + why + ')');
 }
 console.log(mixed ? `\nсмесь латиницы с кириллицей осталась: ${mixed}` : '\nсмеси латиницы с кириллицей в строках нет');
+// ── титул и метки главы (1.0.25) ──
+{
+  const T = [
+    ['Глава 48', { large: false, top: 0.4 }, true],
+    ['ТОМ 3', { large: false, top: 0.9 }, true],
+    ['48', { large: false, top: 0.5 }, true],
+    ['КАК ПРОЖИТЬ ЖИЗНЬ, БУДУЧИ СТАРШЕЙ СЕСТРОЙ', { large: true, top: 0.06 }, true],
+    ['КАК ПРОЖИТЬ ЖИЗНЬ, БУДУЧИ СТАРШЕЙ СЕСТРОЙ', { large: false, top: 0.06 }, false],
+    ['СТОЙ!', { large: true, top: 0.05 }, false],
+    ['СЛАВА БОГУ!', { large: false, top: 0.1 }, false],
+  ];
+  let bad = 0;
+  for (const [t, ln, want] of T) {
+    const got = isTitleOrMarker(t, ln, 1);
+    if (got === want) console.log('  ок    метка:', JSON.stringify(t), '→', got);
+    else { bad++; console.log('  БЕДА  метка:', JSON.stringify(t), '→', got, 'ожидалось', want); }
+  }
+  if (bad) process.exitCode = 1;
+}
+
 console.log(bad ? `ПРОВАЛОВ: ${bad}` : 'всё зелёное');
 process.exit(bad ? 1 : 0);
