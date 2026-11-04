@@ -1880,6 +1880,9 @@ const NativeOcr = {
           inkLowPercentile: R.inkLowPercentile, inkHighPercentile: R.inkHighPercentile,
           inkFlatSpread: R.inkFlatSpread, inkCoefficient: R.inkCoefficient,
           inkMin: R.inkMin, inkMax: R.inkMax, inkTileRows: R.inkTileRows, inkLevels: R.inkLevels,
+          // Чтец, выбранный для этой книги в ⚙ (1.0.22). Приложение читает
+          // ровно им; «auto» — прежний выбор по словарю между rec и eslav.
+          engine: (typeof Reader !== 'undefined' && Reader.engine) || 'auto',
         };
         b.recognizeAsync(b64, JSON.stringify(rules), cbId);
       } catch (e) {

@@ -11,7 +11,7 @@
  */
 const ReadDefaults = {
   KEY: 'readdefaults',
-  v: { mode: 'vertical', dir: 'rtl', voice: false, startPage: 'first' },
+  v: { mode: 'vertical', dir: 'rtl', voice: false, startPage: 'first', engine: 'auto' },
   async load() {
     const row = await DB.get('kv', this.KEY);
     if (row && row.v) this.v = Object.assign({}, this.v, row.v);
@@ -44,6 +44,8 @@ const Reader = {
     this.mode = this.modeUser && book.mode ? book.mode : (D.mode || 'vertical');
     this.dir = this.modeUser && book.dir ? book.dir : (D.dir || 'rtl');
     this.voiceOn = this.modeUser && typeof book.voice === 'boolean' ? book.voice : !!D.voice;
+    // Чтец распознавания: свой у книги, иначе общий. Пять пунктов в ⚙.
+    this.engine = this.modeUser && book.engine ? book.engine : (D.engine || 'auto');
     this.page = clamp(book.progress || 0, 0, this.pages.length - 1);
     this.regions.clear();
     // Что уже прочитано — из базы: после остановки и даже перезапуска чтение

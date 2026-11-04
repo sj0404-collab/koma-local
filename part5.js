@@ -657,15 +657,42 @@ function bindUI() {
       ? 'Эта книга читается вслух сама, как только страница распознана'
       : 'Эта книга без голоса — листаешь сам', 3500);
   };
+  // ── чтец распознавания: у книги свой, иначе общий (1.0.22) ──────────────
+  if ($('#engChips')) $('#engChips').onclick = async (e) => {
+    const chip = e.target.closest('.chip'); if (!chip) return;
+    Reader.engine = chip.dataset.eng || 'auto';
+    await saveProfile({ engine: Reader.engine });
+    syncSettingsUI();
+    toast('Чтец этой книги: ' + (ENG_NAMES[Reader.engine] || Reader.engine)
+      + '. Текст будет распознан заново.', 3500);
+    // Прежний текст этой книги собран другим чтецом — его надо забыть,
+    // иначе человек увидит старые строки и решит, что выбор не работает.
+    try {
+      if (Reader.book) {
+        const rows = (await DB.all('kv') || []).filter(r => typeof r.k === 'string'
+          && r.k.startsWith('buf:' + Reader.book.id + ':'));
+        for (const r of rows) await DB.del('kv', r.k);
+        Reader.regions.clear(); Reader.bandCache.clear();
+        Reader.paintAllFrames();
+      }
+    } catch (err) { console.warn('буфер не очистился', err); }
+  };
+  if ($('#defEngChips')) $('#defEngChips').onclick = async (e) => {
+    const chip = e.target.closest('.chip'); if (!chip) return;
+    ReadDefaults.v.engine = chip.dataset.eng || 'auto';
+    await ReadDefaults.save();
+    syncSettingsUI();
+  };
   if ($('#btnProfReset')) $('#btnProfReset').onclick = async () => {
     if (!Reader.book) return;
     const D = ReadDefaults.v;
     Reader.book = Object.assign({}, Reader.book, {
-      profUser: false, mode: D.mode, dir: D.dir, voice: !!D.voice,
+      profUser: false, mode: D.mode, dir: D.dir, voice: !!D.voice, engine: D.engine || 'auto',
     });
     await DB.put('books', Reader.book);
     Reader.modeUser = false;
     Reader.mode = D.mode; Reader.dir = D.dir; Reader.voiceOn = !!D.voice;
+    Reader.engine = D.engine || 'auto';
     Reader.buildStrip().then(() => { Reader.syncSub(); syncSettingsUI(); });
     toast('Эта книга снова как по умолчанию', 3000);
   };
@@ -755,6 +782,23 @@ async function saveRules() {
   await DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) });
 }
 
+const ENG_NAMES = { auto: 'Авто · по словарю', rec: 'Основной (rec)', eslav: 'Эслав',
+  r3: 'Стилевой А (r3)', r4: 'Стилевой Б (r4)' };
+/**
+ * Подпись под списком чтецов. Здесь же — цифры замера, чтобы выбор был не
+ * «на веру»: две стилевые модели по замеру хуже основных, и «авто» их не берёт.
+ */
+function renderEngHint() {
+  const h = $('#engHint'); if (!h) return;
+  const now = ENG_NAMES[Reader.engine || 'auto'] || 'Авто';
+  const nat = (typeof NativeOcr !== 'undefined' && NativeOcr.ready && NativeOcr.ready());
+  h.innerHTML = 'Сейчас: <b>' + now + '</b>. ' + (nat
+    ? 'Читает нативный движок приложения.'
+    : 'В браузере чтец не переключается — он выбирается в приложении.')
+    + '<br>Замер по нарезкам строк (4.11): комикс — rec 73 %, eslav 71 %, r3 46 %, r4 47 %;'
+    + ' маньхуа — eslav 67 %, rec 54 %, r4 51 %, r3 48 %. Поэтому «авто» эти двое не выбирает.';
+}
+
 function syncSettingsUI() {
   $$('#modeChips .chip').forEach(c => c.classList.toggle('on', c.dataset.mode === Reader.mode));
   $$('#speedChips .chip').forEach(c => c.classList.toggle('on', c.dataset.speed === RULES.speed));
@@ -781,6 +825,9 @@ function syncSettingsUI() {
     const cvd = $('#cbVoiceDefault'); if (cvd) cvd.checked = !!D.voice;
   }
   const cvb = $('#cbVoiceBook'); if (cvb) cvb.checked = !!Reader.voiceOn;
+  $$('#engChips .chip').forEach(c => c.classList.toggle('on', c.dataset.eng === (Reader.engine || 'auto')));
+  $$('#defEngChips .chip').forEach(c => c.classList.toggle('on', c.dataset.eng === ((D && D.engine) || 'auto')));
+  if (typeof renderEngHint === 'function') renderEngHint();
   const ps = $('#profState');
   if (ps) ps.textContent = !Reader.book ? 'книга не открыта'
     : (Reader.modeUser ? 'своё, не как по умолчанию' : 'как по умолчанию');

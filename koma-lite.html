@@ -449,7 +449,16 @@
       <span>Голос у этой книги</span>
       <input type="checkbox" id="cbVoiceBook">
     </label>
-    <button class="btn" id="btnProfReset" style="margin-top:6px">Вернуть как по умолчанию</button>
+    <div class="lbl" style="margin-top:18px">ЧТЕЦ ДЛЯ ЭТОЙ КНИГИ</div>
+    <div class="chips" id="engChips">
+      <button class="chip" data-eng="auto">Авто · по словарю</button>
+      <button class="chip" data-eng="rec">Основной (rec)</button>
+      <button class="chip" data-eng="eslav">Эслав — манга/манхва/маньхуа</button>
+      <button class="chip" data-eng="r3">Стилевой А (r3)</button>
+      <button class="chip" data-eng="r4">Стилевой Б (r4)</button>
+    </div>
+    <div class="hint" id="engHint" style="margin-top:6px"></div>
+    <button class="btn" id="btnProfReset" style="margin-top:10px">Вернуть как по умолчанию</button>
 
     <div class="lbl" style="margin-top:22px">ПО УМОЛЧАНИЮ — ДЛЯ ВСЕХ ОСТАЛЬНЫХ КНИГ</div>
     <div class="chips" id="defModeChips">
@@ -466,8 +475,16 @@
       <span>Голос по умолчанию</span>
       <input type="checkbox" id="cbVoiceDefault">
     </label>
+    <div class="lbl" style="margin-top:14px">ЧТЕЦ ПО УМОЛЧАНИЮ</div>
+    <div class="chips" id="defEngChips">
+      <button class="chip" data-eng="auto">Авто · по словарю</button>
+      <button class="chip" data-eng="rec">Основной (rec)</button>
+      <button class="chip" data-eng="eslav">Эслав — манга/манхва/маньхуа</button>
+      <button class="chip" data-eng="r3">Стилевой А (r3)</button>
+      <button class="chip" data-eng="r4">Стилевой Б (r4)</button>
+    </div>
     <div class="hint" style="margin-top:6px">
-      Каждая книга помнит своё: режим, начало и голос. Книга, которую ты не настраивал,
+      Каждая книга помнит своё: режим, начало, голос и чтеца. Книга, которую ты не настраивал,
       берёт эти значения. Настройка одной книги другие не меняет.
     </div>
     <div class="lbl">СКОРОСТЬ РАСПОЗНАВАНИЯ</div>
@@ -654,7 +671,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.70';
+const VERSION = 'v1.9.71';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2963,6 +2980,9 @@ const NativeOcr = {
           inkLowPercentile: R.inkLowPercentile, inkHighPercentile: R.inkHighPercentile,
           inkFlatSpread: R.inkFlatSpread, inkCoefficient: R.inkCoefficient,
           inkMin: R.inkMin, inkMax: R.inkMax, inkTileRows: R.inkTileRows, inkLevels: R.inkLevels,
+          // Чтец, выбранный для этой книги в ⚙ (1.0.22). Приложение читает
+          // ровно им; «auto» — прежний выбор по словарю между rec и eslav.
+          engine: (typeof Reader !== 'undefined' && Reader.engine) || 'auto',
         };
         b.recognizeAsync(b64, JSON.stringify(rules), cbId);
       } catch (e) {
@@ -6356,7 +6376,7 @@ const EDGE = {
  */
 const ReadDefaults = {
   KEY: 'readdefaults',
-  v: { mode: 'vertical', dir: 'rtl', voice: false, startPage: 'first' },
+  v: { mode: 'vertical', dir: 'rtl', voice: false, startPage: 'first', engine: 'auto' },
   async load() {
     const row = await DB.get('kv', this.KEY);
     if (row && row.v) this.v = Object.assign({}, this.v, row.v);
@@ -6389,6 +6409,8 @@ const Reader = {
     this.mode = this.modeUser && book.mode ? book.mode : (D.mode || 'vertical');
     this.dir = this.modeUser && book.dir ? book.dir : (D.dir || 'rtl');
     this.voiceOn = this.modeUser && typeof book.voice === 'boolean' ? book.voice : !!D.voice;
+    // Чтец распознавания: свой у книги, иначе общий. Пять пунктов в ⚙.
+    this.engine = this.modeUser && book.engine ? book.engine : (D.engine || 'auto');
     this.page = clamp(book.progress || 0, 0, this.pages.length - 1);
     this.regions.clear();
     // Что уже прочитано — из базы: после остановки и даже перезапуска чтение
@@ -9854,15 +9876,42 @@ function bindUI() {
       ? 'Эта книга читается вслух сама, как только страница распознана'
       : 'Эта книга без голоса — листаешь сам', 3500);
   };
+  // ── чтец распознавания: у книги свой, иначе общий (1.0.22) ──────────────
+  if ($('#engChips')) $('#engChips').onclick = async (e) => {
+    const chip = e.target.closest('.chip'); if (!chip) return;
+    Reader.engine = chip.dataset.eng || 'auto';
+    await saveProfile({ engine: Reader.engine });
+    syncSettingsUI();
+    toast('Чтец этой книги: ' + (ENG_NAMES[Reader.engine] || Reader.engine)
+      + '. Текст будет распознан заново.', 3500);
+    // Прежний текст этой книги собран другим чтецом — его надо забыть,
+    // иначе человек увидит старые строки и решит, что выбор не работает.
+    try {
+      if (Reader.book) {
+        const rows = (await DB.all('kv') || []).filter(r => typeof r.k === 'string'
+          && r.k.startsWith('buf:' + Reader.book.id + ':'));
+        for (const r of rows) await DB.del('kv', r.k);
+        Reader.regions.clear(); Reader.bandCache.clear();
+        Reader.paintAllFrames();
+      }
+    } catch (err) { console.warn('буфер не очистился', err); }
+  };
+  if ($('#defEngChips')) $('#defEngChips').onclick = async (e) => {
+    const chip = e.target.closest('.chip'); if (!chip) return;
+    ReadDefaults.v.engine = chip.dataset.eng || 'auto';
+    await ReadDefaults.save();
+    syncSettingsUI();
+  };
   if ($('#btnProfReset')) $('#btnProfReset').onclick = async () => {
     if (!Reader.book) return;
     const D = ReadDefaults.v;
     Reader.book = Object.assign({}, Reader.book, {
-      profUser: false, mode: D.mode, dir: D.dir, voice: !!D.voice,
+      profUser: false, mode: D.mode, dir: D.dir, voice: !!D.voice, engine: D.engine || 'auto',
     });
     await DB.put('books', Reader.book);
     Reader.modeUser = false;
     Reader.mode = D.mode; Reader.dir = D.dir; Reader.voiceOn = !!D.voice;
+    Reader.engine = D.engine || 'auto';
     Reader.buildStrip().then(() => { Reader.syncSub(); syncSettingsUI(); });
     toast('Эта книга снова как по умолчанию', 3000);
   };
@@ -9952,6 +10001,23 @@ async function saveRules() {
   await DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) });
 }
 
+const ENG_NAMES = { auto: 'Авто · по словарю', rec: 'Основной (rec)', eslav: 'Эслав',
+  r3: 'Стилевой А (r3)', r4: 'Стилевой Б (r4)' };
+/**
+ * Подпись под списком чтецов. Здесь же — цифры замера, чтобы выбор был не
+ * «на веру»: две стилевые модели по замеру хуже основных, и «авто» их не берёт.
+ */
+function renderEngHint() {
+  const h = $('#engHint'); if (!h) return;
+  const now = ENG_NAMES[Reader.engine || 'auto'] || 'Авто';
+  const nat = (typeof NativeOcr !== 'undefined' && NativeOcr.ready && NativeOcr.ready());
+  h.innerHTML = 'Сейчас: <b>' + now + '</b>. ' + (nat
+    ? 'Читает нативный движок приложения.'
+    : 'В браузере чтец не переключается — он выбирается в приложении.')
+    + '<br>Замер по нарезкам строк (4.11): комикс — rec 73 %, eslav 71 %, r3 46 %, r4 47 %;'
+    + ' маньхуа — eslav 67 %, rec 54 %, r4 51 %, r3 48 %. Поэтому «авто» эти двое не выбирает.';
+}
+
 function syncSettingsUI() {
   $$('#modeChips .chip').forEach(c => c.classList.toggle('on', c.dataset.mode === Reader.mode));
   $$('#speedChips .chip').forEach(c => c.classList.toggle('on', c.dataset.speed === RULES.speed));
@@ -9978,6 +10044,9 @@ function syncSettingsUI() {
     const cvd = $('#cbVoiceDefault'); if (cvd) cvd.checked = !!D.voice;
   }
   const cvb = $('#cbVoiceBook'); if (cvb) cvb.checked = !!Reader.voiceOn;
+  $$('#engChips .chip').forEach(c => c.classList.toggle('on', c.dataset.eng === (Reader.engine || 'auto')));
+  $$('#defEngChips .chip').forEach(c => c.classList.toggle('on', c.dataset.eng === ((D && D.engine) || 'auto')));
+  if (typeof renderEngHint === 'function') renderEngHint();
   const ps = $('#profState');
   if (ps) ps.textContent = !Reader.book ? 'книга не открыта'
     : (Reader.modeUser ? 'своё, не как по умолчанию' : 'как по умолчанию');

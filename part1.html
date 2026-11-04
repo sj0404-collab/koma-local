@@ -449,7 +449,16 @@
       <span>Голос у этой книги</span>
       <input type="checkbox" id="cbVoiceBook">
     </label>
-    <button class="btn" id="btnProfReset" style="margin-top:6px">Вернуть как по умолчанию</button>
+    <div class="lbl" style="margin-top:18px">ЧТЕЦ ДЛЯ ЭТОЙ КНИГИ</div>
+    <div class="chips" id="engChips">
+      <button class="chip" data-eng="auto">Авто · по словарю</button>
+      <button class="chip" data-eng="rec">Основной (rec)</button>
+      <button class="chip" data-eng="eslav">Эслав — манга/манхва/маньхуа</button>
+      <button class="chip" data-eng="r3">Стилевой А (r3)</button>
+      <button class="chip" data-eng="r4">Стилевой Б (r4)</button>
+    </div>
+    <div class="hint" id="engHint" style="margin-top:6px"></div>
+    <button class="btn" id="btnProfReset" style="margin-top:10px">Вернуть как по умолчанию</button>
 
     <div class="lbl" style="margin-top:22px">ПО УМОЛЧАНИЮ — ДЛЯ ВСЕХ ОСТАЛЬНЫХ КНИГ</div>
     <div class="chips" id="defModeChips">
@@ -466,8 +475,16 @@
       <span>Голос по умолчанию</span>
       <input type="checkbox" id="cbVoiceDefault">
     </label>
+    <div class="lbl" style="margin-top:14px">ЧТЕЦ ПО УМОЛЧАНИЮ</div>
+    <div class="chips" id="defEngChips">
+      <button class="chip" data-eng="auto">Авто · по словарю</button>
+      <button class="chip" data-eng="rec">Основной (rec)</button>
+      <button class="chip" data-eng="eslav">Эслав — манга/манхва/маньхуа</button>
+      <button class="chip" data-eng="r3">Стилевой А (r3)</button>
+      <button class="chip" data-eng="r4">Стилевой Б (r4)</button>
+    </div>
     <div class="hint" style="margin-top:6px">
-      Каждая книга помнит своё: режим, начало и голос. Книга, которую ты не настраивал,
+      Каждая книга помнит своё: режим, начало, голос и чтеца. Книга, которую ты не настраивал,
       берёт эти значения. Настройка одной книги другие не меняет.
     </div>
     <div class="lbl">СКОРОСТЬ РАСПОЗНАВАНИЯ</div>

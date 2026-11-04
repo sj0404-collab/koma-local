@@ -55,6 +55,18 @@ class OcrEngine(private val modelsDir: File) {
         const val ESL = "eslav.onnx"
         const val ESL_CHARSET = "eslav-charset.txt"
         /**
+         * Ещё два чтеца той же семьи, что «эслав» (одна азбука на 109 знаков,
+         * серый вход 32 px): `best_base_r3` и `best_finetuned_r4`.
+         *
+         * Зачем: их просили как «модели под стиль рисунка» — выбор вручную и
+         * авто. Честный замер по нарезкам строк (tools/bench/engine_bench.py,
+         * 4.11) дал: на комиксе rec 73 %, eslav 71 %, а эти двое 46 % и 47 %.
+         * Поэтому они есть в списке, но их видно с цифрами, и «авто» их не
+         * выбирает — иначе приложение молча отдавало бы худший текст.
+         */
+        const val R3 = "best_base_r3.onnx"
+        const val R4 = "best_finetuned_r4.onnx"
+        /**
          * Словарь русских слов для ВЫБОРА чтеца.
          *
          * Зачем: на записи со телефона (полоса вебтуна) основной чтец `rec`
@@ -72,7 +84,7 @@ class OcrEngine(private val modelsDir: File) {
          * раскладывает их заново только тогда, когда отпечаток в файлах разошёлся
          * со сборкой. Иначе на каждом запуске 12,6 МБ переписывались бы впустую.
          */
-        const val EMBEDDED_STAMP = "2026-11-02.3"
+        const val EMBEDDED_STAMP = "2026-11-04.1"
         private const val DET_THRESHOLD = 0.3f
         /** Плитка детектора и перекрытие: как в отдельной сборке (core.js). */
         private const val TILE = 1500
@@ -93,6 +105,11 @@ class OcrEngine(private val modelsDir: File) {
         val inkMax: Int = 235,
         val inkTileRows: Int = 4,
         val inkLevels: Int = 1,
+        /**
+         * Каким чтецом читать: "auto" (по словарю между rec и eslav, как было),
+         * "rec", "eslav", "r3", "r4". Выбор приходит из профиля книги.
+         */
+        val engine: String = "auto",
     ) {
         companion object {
             fun from(json: String?): Rules {
@@ -110,6 +127,7 @@ class OcrEngine(private val modelsDir: File) {
                     inkMax = o.optInt("inkMax", d.inkMax),
                     inkTileRows = o.optInt("inkTileRows", d.inkTileRows),
                     inkLevels = o.optInt("inkLevels", d.inkLevels),
+                    engine = o.optString("engine", d.engine).ifBlank { "auto" },
                 )
             }
         }
@@ -123,6 +141,8 @@ class OcrEngine(private val modelsDir: File) {
     private var charset: List<String> = emptyList()
     /** Второй чтец и его азбука (по одному символу, blank = размер азбуки). */
     private var eslav: OrtSession? = null
+    /** Дополнительные чтецы: "r3", "r4" (та же азбука, что у eslav). */
+    private val small = LinkedHashMap<String, OrtSession>()
     private var eslavCharset: List<String> = emptyList()
     /** Русские слова для выбора чтеца. Пустой набор — выбор по длине слов. */
     private var vocab: Set<String> = emptySet()
@@ -170,6 +190,13 @@ class OcrEngine(private val modelsDir: File) {
         false
     }
 
+    private fun inAssets(am: AssetManager, name: String): Boolean = try {
+        am.open(name).close()
+        true
+    } catch (t: Throwable) {
+        false
+    }
+
     private fun vocabInAssets(am: AssetManager): Boolean = try {
         am.open("$ASSET_DIR/$VOCAB").close()
         true
@@ -200,6 +227,10 @@ class OcrEngine(private val modelsDir: File) {
             if (eslavInAssets(am)) {
                 copyAsset(am, "$ASSET_DIR/$ESL", File(modelsDir, ESL))
                 copyAsset(am, "$ASSET_DIR/$ESL_CHARSET", File(modelsDir, ESL_CHARSET))
+            }
+            // Стилевые чтецы — необязательные: нет файла, нет пункта в списке.
+            for (name in listOf(R3, R4)) {
+                if (inAssets(am, "$ASSET_DIR/$name")) copyAsset(am, "$ASSET_DIR/$name", File(modelsDir, name))
             }
             // Словарь нужен для выбора чтеца. Нет его — работаем как раньше.
             if (vocabInAssets(am)) copyAsset(am, "$ASSET_DIR/$VOCAB", File(modelsDir, VOCAB))
@@ -251,6 +282,18 @@ class OcrEngine(private val modelsDir: File) {
                     KomaLog.log("нативный OCR: второй чтец не поднялся — ${t.message ?: ""}")
                 }
             }
+            // Стилевые чтецы той же семьи, что eslav: та же азбука 109 знаков.
+            small.clear()
+            if (eslav != null) small["eslav"] = eslav!!
+            for ((key, name) in listOf("r3" to R3, "r4" to R4)) {
+                val f = File(modelsDir, name)
+                if (!f.exists()) continue
+                try {
+                    small[key] = e.createSession(f.absolutePath, opts)
+                } catch (t: Throwable) {
+                    KomaLog.log("нативный OCR: чтец $key не поднялся — ${t.message ?: ""}")
+                }
+            }
             vocab = try {
                 val f = File(modelsDir, VOCAB)
                 if (f.exists()) f.readLines().map { it.trim().uppercase() }.filter { it.length >= 2 }.toHashSet()
@@ -292,6 +335,10 @@ class OcrEngine(private val modelsDir: File) {
         o.put("models", modelsPresent())
         o.put("classes", charset.size)
         o.put("eslav", eslav != null)
+        o.put("engines", org.json.JSONArray().apply {
+            put("auto"); put("rec")
+            for (k in listOf("eslav", "r3", "r4")) if (small[k] != null) put(k)
+        })
         o.put("eslavClasses", eslavCharset.size)
         o.put("error", error ?: "")
         o.put("ort", "onnxruntime-android")
@@ -406,12 +453,28 @@ class OcrEngine(private val modelsDir: File) {
                     // (1.9.45) выбирал по словарю «красивое» слово вместо
                     // верного: «ЧИНАТЬ ВСТРЕЧУ,» → «ЧИТАТЬ ВТ Ч» (в словаре
                     // есть «ЧИТАТЬ»). Замер: evalwork/ab_config.py.
-                    val first = try { decode(crop, wide) } catch (t: Throwable) { "" to 0.0 }
-                    val second = if (eslav != null) try { decodeEslav(crop) } catch (t: Throwable) {
-                        KomaLog.log("второй чтец: ошибка ${t.message ?: t.javaClass.simpleName}, читаю прежним")
-                        null
-                    } else null
-                    pair = pickBetter(first, second)
+                    // Выбор чтеца (1.0.22): «авто» — как раньше, по словарю;
+                    // иначе читает ровно тот, кого выбрал человек в профиле книги.
+                    val want = rules.engine
+                    val picked = if (want == "auto") null else small[want]
+                    if (want != "auto" && picked == null && want != "rec") {
+                        // Файла выбранного чтеца нет — честно уходим в авто,
+                        // но пишем это в журнал, а не молчим.
+                        KomaLog.log("нативный OCR: чтец «$want» не найден, читаю авто")
+                    }
+                    if (want == "rec" || (want != "auto" && picked == null)) {
+                        val first = try { decode(crop, wide) } catch (t: Throwable) { "" to 0.0 }
+                        pair = first
+                    } else if (picked != null) {
+                        pair = try { decodeSmall(picked, crop) } catch (t: Throwable) { "" to 0.0 }
+                    } else {
+                        val first = try { decode(crop, wide) } catch (t: Throwable) { "" to 0.0 }
+                        val second = if (eslav != null) try { decodeEslav(crop) } catch (t: Throwable) {
+                            KomaLog.log("второй чтец: ошибка ${t.message ?: t.javaClass.simpleName}, читаю прежним")
+                            null
+                        } else null
+                        pair = pickBetter(first, second)
+                    }
                 } finally { crop.recycle() }
                 val (text, conf) = pair
                 if (text.isBlank() || conf <= rules.minConfidence) continue
@@ -784,8 +847,21 @@ class OcrEngine(private val modelsDir: File) {
      * softmax выход модели это логиты (значения до 15), и порог 0,25 в правилах
      * страницы не отсекал бы ничего.
      */
-    private fun decodeEslav(crop: Bitmap): Pair<String, Double> {
-        val sess = eslav ?: return "" to 0.0
+    private fun decodeEslav(crop: Bitmap): Pair<String, Double> = decodeSmall(eslav, crop)
+
+    /**
+     * Разбор строки любым малым чтецом (eslav / r3 / r4 — одна азбука).
+     *
+     * ИСПРАВЛЕНО 1.0.22: раньше время бралось как dims[1], а классы как dims[2].
+     * У этих моделей выход (T, 1, 111), то есть dims[1] = 1 — разбор читал
+     * ОДИН шаг времени и выдавал одну букву. Из-за этого второй чтец никогда не
+     * выигрывал у `rec` (сравнение по словарю отбрасывало огрызок), и весь
+     * «второй чтец», которым по замеру читается 92 % строк, на телефоне не
+     * работал вовсе. Теперь размеры берутся от конца: классы — последняя ось,
+     * шаги — всё остальное.
+     */
+    private fun decodeSmall(session: OrtSession?, crop: Bitmap): Pair<String, Double> {
+        val sess = session ?: return "" to 0.0
         val e = env ?: return "" to 0.0
         val cs = eslavCharset
         if (cs.isEmpty()) return "" to 0.0
@@ -819,8 +895,12 @@ class OcrEngine(private val modelsDir: File) {
                 val t = res[0] as OnnxTensor
                 val info = t.info as ai.onnxruntime.TensorInfo
                 val dims = info.shape
-                val T = dims[1].toInt()
-                val C = dims[2].toInt()
+                // (T, 1, C) или (1, T, C) — классы всегда последняя ось.
+                var total = 1
+                for (d in dims) total *= d.toInt()
+                val C = dims[dims.size - 1].toInt()
+                val T = if (C > 0) total / C else 0
+                if (T <= 0 || C <= 0) return "" to 0.0
                 val values = FloatArray(T * C)
                 t.floatBuffer.get(values)
                 val blank = cs.size
