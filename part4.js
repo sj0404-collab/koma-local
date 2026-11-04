@@ -600,10 +600,29 @@ const Reader = {
       // эффекта приклеивается к началу текста уже при склейке строк, то есть
       // позже первой чистки («*ь*.*о НЕ УВЕРЕН…» — эмулятор APKForge, 29.10).
       fresh = fresh
-        .map(l => ({ ...l, text: trimJunkEdges(String(l.text || '')) }))
-        .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2)
-        // Титул и «Глава 48» — не реплики: их не читаем и в шторке помечаем.
-        .filter(l => !isTitleOrMarker(l.text, l, 1));
+        // Нативная ветка отдаёт текст как есть, а полировка (сборка обрывков,
+        // ремонт слов по словарю) жила только в веб-ветке и в чистке буфера.
+        // Отсюда на телефоне 00:01 жили «ШКОЛ?» вместо «ШКОЛУ» и «ПОДУМАЛ АШ»:
+        // их не чинили, а не «не смогли починить». Полируем ровно один раз.
+        .map(l => {
+          const raw = String(l.text || '');
+          const text = l.polished ? raw
+            : trimJunkEdges(Words.ready ? Words.polish(raw, RULES.junkRatio, l.confidence) : raw);
+          return { ...l, rawText: raw, text, polished: true };
+        })
+        .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
+      // Титул, «Гл. 48» и адрес сайта — не реплики. Высота строки нужна, чтобы
+      // отличить каллиграфию от реплики: медиана по самой странице.
+      const hs = fresh.map(l => Number(l.height || (l.bottom - l.top)) || 0)
+        .filter(h => h > 0).sort((a, b) => a - b);
+      const medH = hs.length ? hs[Math.floor(hs.length / 2)] : 0;
+      fresh = fresh
+        // Смотрим и на сырой текст: полировка умеет «починить» адрес сайта до
+        // нечитаемого «МАNГАВЛФФ.РИ», а мусор из обрывков каллиграфии — до
+        // формально словарных, но бессмысленных слов («ТАР ТТ ПА АДЕ ЕД»).
+        .filter(l => !isTitleOrMarker(l.rawText || l.text, l, 1, medH))
+        .filter(l => !isTitleOrMarker(l.text, l, 1, medH))
+        .filter(l => !looksLikeJunkLine(l.text));
       // Помечаем, на какой полосе нашлась реплика: в шторке видно, что
       // показано «на экране», а что распознано раньше с этой же страницы.
       const bandTop = band ? Math.round(band.y0) : 0;
@@ -1487,7 +1506,10 @@ const NATIVE_UI = {
       const total = (TTS && TTS.queue) ? TTS.queue.length : 0;
       const idx = (TTS && TTS.curIdx) ? TTS.curIdx : (total ? 1 : 0);
       const bands = (typeof Reader !== 'undefined' && Reader.bands) ? Reader.bands.length : 0;
-      const band = (typeof Reader !== 'undefined') ? (Reader.bandIndex | 0) + 1 : 0;
+      // Номер полосы не может быть больше их числа: на телефоне 00:01 панель
+      // показывала «полоса 3 из 1», потому что номер шёл из bandIndex, а всего
+      // полос считалось по другой величине. Если полос нет — пишем «1».
+      const band = Math.min((typeof Reader !== 'undefined' ? (Reader.bandIndex | 0) : 0) + 1, bands || 1);
       let voice = '';
       try { voice = VOICE.native() ? 'Android TTS' : 'Web Speech'; } catch (e) { voice = ''; }
       const paused = !!(TTS && TTS.paused);
@@ -2290,7 +2312,17 @@ function hideArrow() { $('#nextArrow').style.display = 'none'; }
  * текст, распознанный раньше. Пустые строки выпадают вместе со своими рамками.
  */
 async function cleanLines(lines) {
+  // Словарь разжимается асинхронно при запуске. Если книгу открыли раньше, чем
+  // он готов, весь ремонт слов молча выключался, и в буфере навсегда оставался
+  // сырой текст («ШКОЛ?», «ПОДУМАЛ АШ» — телефон 00:02). Ждём словарь здесь.
+  if (!Words.ready) { try { await Words.load(); } catch (e) { console.warn('словарь не готов', e); } }
   const keyOf = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  // Правила «что не реплика» (титул, «Гл. 48», адрес сайта, мусор из редких
+  // слов) должны действовать и на старый буфер: иначе после обновления человек
+  // снова видит в шторке титул, который я «уже убрал».
+  const hs = (lines || []).map(l => Number(l.height || (l.bottom - l.top)) || 0)
+    .filter(h => h > 0).sort((a, b) => a - b);
+  const medH = hs.length ? hs[Math.floor(hs.length / 2)] : 0;
   const out = [];
   for (const ln of lines) {
     // Мусорные края («*ь*.*о НЕ УВЕРЕН…») снимаем ПОСЛЕ словаря: обрывок
@@ -2313,6 +2345,9 @@ async function cleanLines(lines) {
     // Регистр: «ОНА Вс ШЕПЧЕТ» → «ОНА ВС ШЕПЧЕТ» (см. fixCaseInCaps).
     text = fixCaseInCaps(text);
     if (!text) continue;
+    if (isTitleOrMarker(String(ln.text || ''), ln, 1, medH)) continue;
+    if (isTitleOrMarker(text, ln, 1, medH)) continue;
+    if (looksLikeJunkLine(text)) continue;
     // Один и тот же текст в том же месте — дубль от полос прежней версии.
     const k = keyOf(text);
     const dup = k && out.some(o => keyOf(o.text) === k

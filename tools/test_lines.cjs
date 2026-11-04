@@ -95,12 +95,12 @@ const body = [
   extractBlock('function cyrifySingleLetters(text)'),
   extractBlock('function trimJunkEdges(text)'),
   PART3.slice(PART3.indexOf('const FIXED_PHRASES = ['), PART3.indexOf('function polishLineText(raw) {')),
-  extractBlock('function isTitleOrMarker(text, line, pageHeight)'),
+  PART3.slice(PART3.indexOf('function isTitleOrMarker('), PART3.indexOf('function trimJunkEdges(')),
   extractBlock('function fixCaseInCaps(text)'),
   extractBlock('function dropStuckFragments('),
   extractBlock('function median('),
   extractBlock('function glueSplitWords(text)'),
-  'module.exports = { polishLineText, mergeSplitTokens, spliceFragmentRuns, restoreCutTails, dropStuckFragments, dropDuplicateReplicas, isTitleOrMarker };',
+  'module.exports = { polishLineText, mergeSplitTokens, spliceFragmentRuns, restoreCutTails, dropStuckFragments, dropDuplicateReplicas, isTitleOrMarker, looksLikeJunkLine };',
 ].join('\n');
 function extractLine(head) {
   const start = PART3.indexOf(head);
@@ -111,13 +111,15 @@ function extractLine(head) {
 
 const mod = { exports: {} };
 new Function('Words', 'module', 'console', body)(Words, mod, console);
-const { polishLineText, isTitleOrMarker } = mod.exports;
+const { polishLineText, isTitleOrMarker, looksLikeJunkLine } = mod.exports;
 
 // Строки дословно со скриншотов телефона (v1.9.62, 4.11).
 // null — строку надо выбросить целиком (это не реплика, а мусор).
 const CASES = [
   // ── 1.0.25: фразы и титул (скриншоты телефона 22:34) ──
   ['СЛАБА БОГУ!', 'СЛАВА БОГУ!'],
+  // ── телефон 00:01–00:02 (1.0.26): нативная ветка не полировалась ──
+  ['ЭЙ, МИЧИРУЯ ТУТ ПОДУМАЛ АШ', 'ЭЙ, МИЧИРУЯ ТУТ ПОДУМАЛ'],
   ['СЛАВ БОГУ!', 'СЛАВА БОГУ!'],
   ['О ЧЕЛ ТЫ?', 'О ЧЕМ ТЫ?'],
   ['ПРОСТО КОГДА ТЫ ГОВОРИЛ ПО ТЕЛЕ ФО ХОРОШО.', 'ПРОСТО КОГДА ТЫ ГОВОРИЛ ПО ТЕЛЕФОН ХОРОШО.'],
@@ -196,21 +198,43 @@ console.log(mixed ? `\nсмесь латиницы с кириллицей ос�
 // ── титул и метки главы (1.0.25) ──
 {
   const T = [
-    ['Глава 48', { large: false, top: 0.4 }, true],
-    ['ТОМ 3', { large: false, top: 0.9 }, true],
-    ['48', { large: false, top: 0.5 }, true],
-    ['КАК ПРОЖИТЬ ЖИЗНЬ, БУДУЧИ СТАРШЕЙ СЕСТРОЙ', { large: true, top: 0.06 }, true],
-    ['КАК ПРОЖИТЬ ЖИЗНЬ, БУДУЧИ СТАРШЕЙ СЕСТРОЙ', { large: false, top: 0.06 }, false],
-    ['СТОЙ!', { large: true, top: 0.05 }, false],
-    ['СЛАВА БОГУ!', { large: false, top: 0.1 }, false],
+    // телефон 00:01–00:02 (1.0.25): титул читался как реплика, адрес сайта тоже
+    ['MANGAВLFF.RU', { top: 0.2, height: 18 }, 0, true],
+    ['Как прожить жизнь, будучи старшей сестрой тирана', { top: 0.28, height: 64 }, 26, true],
+    ['УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ, ТАК ЧТО ЕЁ ВЫСОЧЕСТВО, ДОЛЖНО БЫТЬ, ПРИБЫЛА.', { top: 0.8, height: 22 }, 26, false],
+    ['А ПОЧЕМУ ТЫ ПЕРЕВЕЛАСЬ В НАШУ ШКОЛУ?', { top: 0.2, height: 22 }, 26, false],
+    ['ОГО ПОХОЖЕ ВЫ ОЧЕНЬ ЗАНЯТА!', { top: 0.7, height: 22 }, 26, false],
+    ['Глава 48', { top: 0.4, height: 20 }, 0, true],
+    ['Гл. 48', { top: 0.9, height: 20 }, 0, true],
+    ['ТОМ 3', { top: 0.9, height: 20 }, 0, true],
+    ['48', { top: 0.5, height: 20 }, 0, true],
+    ['СТОЙ!', { large: true, top: 0.05, height: 40 }, 26, false],
+    ['СЛАВА БОГУ!', { top: 0.1, height: 22 }, 26, false],
+    ['КАК ПРОЖИТЬ ЖИЗНЬ, БУДУЧИ СТАРШЕЙ СЕСТРОЙ', { large: true, top: 0.06, height: 40 }, 26, false],
   ];
+
   let bad = 0;
-  for (const [t, ln, want] of T) {
-    const got = isTitleOrMarker(t, ln, 1);
+  for (const [t, ln, med, want] of T) {
+    const got = isTitleOrMarker(t, ln, 1, med);
     if (got === want) console.log('  ок    метка:', JSON.stringify(t), '→', got);
     else { bad++; console.log('  БЕДА  метка:', JSON.stringify(t), '→', got, 'ожидалось', want); }
   }
   if (bad) process.exitCode = 1;
+}
+
+// ── мусорная строка из редких слов (1.0.26) ──
+{
+  const J = [
+    ['ТАР ТТ ПА АДЕ ЕД', true],
+    ['УЖЕ ПОРА НАЧИНАТЬ ВСТРЕЧУ, ТАК ЧТО ЕЁ ВЫСОЧЕСТВО, ДОЛЖНО БЫТЬ, ПРИБЫЛА.', false],
+    ['БОЖЕ, ОТВЕТЬ НА МОЙ ЗОВ.', false],
+    ['СТОЙ!', false],
+  ];
+  for (const [t, want] of J) {
+    const got = looksLikeJunkLine(t);
+    if (got === want) console.log('  ок    мусор:', JSON.stringify(t), '→', got);
+    else { bad++; console.log('  БЕДА  мусор:', JSON.stringify(t), '→', got, 'ожидалось', want); }
+  }
 }
 
 console.log(bad ? `ПРОВАЛОВ: ${bad}` : 'всё зелёное');

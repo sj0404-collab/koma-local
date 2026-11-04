@@ -842,6 +842,44 @@ function fixPhrases(text) {
   return t;
 }
 
+/**
+ * Строка из редких слов — это мусор, а не реплика (1.0.26).
+ *
+ * Телефон 00:01: строкой реплики стояло «ТАР ТТ ПА АДЕ ЕД» — обрывки
+ * каллиграфии титула. Все эти слова формально есть в словаре (тар, тт, па,
+ * аде, ед), поэтому «не словарное» их не ловит. Зато ловит частотность:
+ * в настоящей реплике почти все слова ходовые, в мусоре — нет.
+ * Правило узкое: четыре и больше слова и меньше 40 % из них ходовые.
+ */
+const LETTER_NAMES = new Set(['аш', 'бэ', 'вэ', 'гэ', 'дэ', 'жэ', 'зэ', 'ка', 'эл',
+  'эм', 'эн', 'пэ', 'эр', 'эс', 'тэ', 'эф', 'ха', 'цэ', 'че', 'ша', 'ща']);
+function looksLikeJunkLine(text) {
+  if (typeof Words === 'undefined' || !Words.ready || !Words.rank) return false;
+  const tokens = String(text || '').split(/\s+/).filter(t => /\p{L}/u.test(t));
+  if (tokens.length < 4) return false;
+  const limit = Number(Words.KNOWN_RANK) || 20000;
+  let common = 0;
+  for (const t of tokens) {
+    const core = (t.match(/\p{L}+/gu) || []).join('').toLowerCase();
+    const r = Words.rank.get(core);
+    if (r !== undefined && r <= limit) common++;
+  }
+  return common / tokens.length < 0.4;
+}
+
+/** Убрать хвост-«название буквы», приклеенный чтецом («ПОДУМАЛ АШ»). */
+function dropLetterNameTail(text) {
+  const tokens = String(text || '').split(' ').filter(Boolean);
+  if (tokens.length < 2) return text;
+  const last = tokens[tokens.length - 1];
+  const core = ((last.match(/[А-Яа-яЁё]+/g) || []).join('')).toLowerCase();
+  if (!LETTER_NAMES.has(core)) return text;
+  const prev = (tokens[tokens.length - 2].match(/[А-Яа-яЁё]+/g) || []).join('');
+  if (prev.length < 4) return text;
+  tokens.pop();
+  return tokens.join(' ');
+}
+
 function polishLineText(raw) {
   let text = String(raw || '').replace(/\u00AD/g, '-').replace(/\s+/g, ' ').trim();
   if (!text) return '';
@@ -871,6 +909,7 @@ function polishLineText(raw) {
   text = fixCaseInCaps(text);
   // Фразы чиним ПОСЛЕ слов: словарь уже успел испортить «СЛАВА» → «СЛАБА».
   text = fixPhrases(text);
+  text = dropLetterNameTail(text);
   return trimJunkEdges(text).trim();
 }
 
@@ -913,15 +952,31 @@ function fixLookalikesForced(raw, opts = {}) {
  *    страницы И не похожий на реплику (нет знаков речи, больше двух слов) —
  *    это титул.
  */
-function isTitleOrMarker(text, line, pageHeight) {
+function isTitleOrMarker(text, line, pageHeight, medHeight) {
   const t = String(text || '').trim();
   if (!t) return false;
-  if (/^(глава|том|часть|эпизод|chapter|episode|vol\.?|volume)\s*[№#]?\s*\d+\s*$/i.test(t)) return true;
+  // Метка главы/тома и чистая нумерация.
+  if (/^(глава|том|часть|эпизод|chapter|episode|vol\.?|volume|гл\.?)\s*[№#]?\s*\d+\s*$/i.test(t)) return true;
   if (/^\d{1,3}$/.test(t)) return true;
-  const large = !!(line && line.large);
-  const top = !!(line && Number.isFinite(line.top) && line.top < 0.18);
+  // Водяной знак сайта: «MANGAВLFF.RU», «mangalib.me», «readmanga». Читать вслух
+  // адрес сайта — дефект (телефон 00:01, «MANGAВLFF.RU» был репликой №1).
+  const latin = (t.match(/[A-Za-z]/g) || []).length;
+  const cyr = (t.match(/[А-Яа-яЁё]/g) || []).length;
+  if (/\.(ru|com|net|org|me|io)\b/i.test(t) && latin >= 3) return true;
+  if (latin >= 5 && latin >= cyr && /manga|mangal|readmanga|mintmanga|scans?\.|reader|lib\./i.test(t)) return true;
   const words = (t.match(/\p{L}+/gu) || []).length;
-  if (large && top && words >= 3 && !/[!?…]/u.test(t)) return true;
+  const lowered = (t.match(/[а-яёa-z]/g) || []).length;
+  const letters = (t.match(/\p{L}/gu) || []).length;
+  const lowShare = letters ? lowered / letters : 0;
+  const h = Number((line && (line.height || (line.bottom - line.top))) || 0);
+  const med = Number(medHeight || 0);
+  const tall = !!(h > 0 && med > 0 && h >= med * 1.45);
+  const inTop = !!(line && Number.isFinite(line.top) && line.top < 0.5);
+  // Титул: каллиграфия/надпись. Признаки вместе — крупный кегль относительно
+  // строк страницы, три и больше слов, строчные буквы (реплики в манге идут
+  // капсом) и ни одного «! ?». «СТОЙ!» и «СЛАВА БОГУ!» сюда не попадают.
+  if (words >= 3 && lowShare >= 0.3 && !/[!?…]/u.test(t)
+      && ((tall && inTop) || (!!(line && line.large) && inTop))) return true;
   return false;
 }
 

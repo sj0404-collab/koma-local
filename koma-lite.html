@@ -674,7 +674,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.74';
+const VERSION = 'v1.9.75';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -1945,6 +1945,44 @@ function fixPhrases(text) {
   return t;
 }
 
+/**
+ * Строка из редких слов — это мусор, а не реплика (1.0.26).
+ *
+ * Телефон 00:01: строкой реплики стояло «ТАР ТТ ПА АДЕ ЕД» — обрывки
+ * каллиграфии титула. Все эти слова формально есть в словаре (тар, тт, па,
+ * аде, ед), поэтому «не словарное» их не ловит. Зато ловит частотность:
+ * в настоящей реплике почти все слова ходовые, в мусоре — нет.
+ * Правило узкое: четыре и больше слова и меньше 40 % из них ходовые.
+ */
+const LETTER_NAMES = new Set(['аш', 'бэ', 'вэ', 'гэ', 'дэ', 'жэ', 'зэ', 'ка', 'эл',
+  'эм', 'эн', 'пэ', 'эр', 'эс', 'тэ', 'эф', 'ха', 'цэ', 'че', 'ша', 'ща']);
+function looksLikeJunkLine(text) {
+  if (typeof Words === 'undefined' || !Words.ready || !Words.rank) return false;
+  const tokens = String(text || '').split(/\s+/).filter(t => /\p{L}/u.test(t));
+  if (tokens.length < 4) return false;
+  const limit = Number(Words.KNOWN_RANK) || 20000;
+  let common = 0;
+  for (const t of tokens) {
+    const core = (t.match(/\p{L}+/gu) || []).join('').toLowerCase();
+    const r = Words.rank.get(core);
+    if (r !== undefined && r <= limit) common++;
+  }
+  return common / tokens.length < 0.4;
+}
+
+/** Убрать хвост-«название буквы», приклеенный чтецом («ПОДУМАЛ АШ»). */
+function dropLetterNameTail(text) {
+  const tokens = String(text || '').split(' ').filter(Boolean);
+  if (tokens.length < 2) return text;
+  const last = tokens[tokens.length - 1];
+  const core = ((last.match(/[А-Яа-яЁё]+/g) || []).join('')).toLowerCase();
+  if (!LETTER_NAMES.has(core)) return text;
+  const prev = (tokens[tokens.length - 2].match(/[А-Яа-яЁё]+/g) || []).join('');
+  if (prev.length < 4) return text;
+  tokens.pop();
+  return tokens.join(' ');
+}
+
 function polishLineText(raw) {
   let text = String(raw || '').replace(/\u00AD/g, '-').replace(/\s+/g, ' ').trim();
   if (!text) return '';
@@ -1974,6 +2012,7 @@ function polishLineText(raw) {
   text = fixCaseInCaps(text);
   // Фразы чиним ПОСЛЕ слов: словарь уже успел испортить «СЛАВА» → «СЛАБА».
   text = fixPhrases(text);
+  text = dropLetterNameTail(text);
   return trimJunkEdges(text).trim();
 }
 
@@ -2016,15 +2055,31 @@ function fixLookalikesForced(raw, opts = {}) {
  *    страницы И не похожий на реплику (нет знаков речи, больше двух слов) —
  *    это титул.
  */
-function isTitleOrMarker(text, line, pageHeight) {
+function isTitleOrMarker(text, line, pageHeight, medHeight) {
   const t = String(text || '').trim();
   if (!t) return false;
-  if (/^(глава|том|часть|эпизод|chapter|episode|vol\.?|volume)\s*[№#]?\s*\d+\s*$/i.test(t)) return true;
+  // Метка главы/тома и чистая нумерация.
+  if (/^(глава|том|часть|эпизод|chapter|episode|vol\.?|volume|гл\.?)\s*[№#]?\s*\d+\s*$/i.test(t)) return true;
   if (/^\d{1,3}$/.test(t)) return true;
-  const large = !!(line && line.large);
-  const top = !!(line && Number.isFinite(line.top) && line.top < 0.18);
+  // Водяной знак сайта: «MANGAВLFF.RU», «mangalib.me», «readmanga». Читать вслух
+  // адрес сайта — дефект (телефон 00:01, «MANGAВLFF.RU» был репликой №1).
+  const latin = (t.match(/[A-Za-z]/g) || []).length;
+  const cyr = (t.match(/[А-Яа-яЁё]/g) || []).length;
+  if (/\.(ru|com|net|org|me|io)\b/i.test(t) && latin >= 3) return true;
+  if (latin >= 5 && latin >= cyr && /manga|mangal|readmanga|mintmanga|scans?\.|reader|lib\./i.test(t)) return true;
   const words = (t.match(/\p{L}+/gu) || []).length;
-  if (large && top && words >= 3 && !/[!?…]/u.test(t)) return true;
+  const lowered = (t.match(/[а-яёa-z]/g) || []).length;
+  const letters = (t.match(/\p{L}/gu) || []).length;
+  const lowShare = letters ? lowered / letters : 0;
+  const h = Number((line && (line.height || (line.bottom - line.top))) || 0);
+  const med = Number(medHeight || 0);
+  const tall = !!(h > 0 && med > 0 && h >= med * 1.45);
+  const inTop = !!(line && Number.isFinite(line.top) && line.top < 0.5);
+  // Титул: каллиграфия/надпись. Признаки вместе — крупный кегль относительно
+  // строк страницы, три и больше слов, строчные буквы (реплики в манге идут
+  // капсом) и ни одного «! ?». «СТОЙ!» и «СЛАВА БОГУ!» сюда не попадают.
+  if (words >= 3 && lowShare >= 0.3 && !/[!?…]/u.test(t)
+      && ((tall && inTop) || (!!(line && line.large) && inTop))) return true;
   return false;
 }
 
@@ -7014,10 +7069,29 @@ const Reader = {
       // эффекта приклеивается к началу текста уже при склейке строк, то есть
       // позже первой чистки («*ь*.*о НЕ УВЕРЕН…» — эмулятор APKForge, 29.10).
       fresh = fresh
-        .map(l => ({ ...l, text: trimJunkEdges(String(l.text || '')) }))
-        .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2)
-        // Титул и «Глава 48» — не реплики: их не читаем и в шторке помечаем.
-        .filter(l => !isTitleOrMarker(l.text, l, 1));
+        // Нативная ветка отдаёт текст как есть, а полировка (сборка обрывков,
+        // ремонт слов по словарю) жила только в веб-ветке и в чистке буфера.
+        // Отсюда на телефоне 00:01 жили «ШКОЛ?» вместо «ШКОЛУ» и «ПОДУМАЛ АШ»:
+        // их не чинили, а не «не смогли починить». Полируем ровно один раз.
+        .map(l => {
+          const raw = String(l.text || '');
+          const text = l.polished ? raw
+            : trimJunkEdges(Words.ready ? Words.polish(raw, RULES.junkRatio, l.confidence) : raw);
+          return { ...l, rawText: raw, text, polished: true };
+        })
+        .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
+      // Титул, «Гл. 48» и адрес сайта — не реплики. Высота строки нужна, чтобы
+      // отличить каллиграфию от реплики: медиана по самой странице.
+      const hs = fresh.map(l => Number(l.height || (l.bottom - l.top)) || 0)
+        .filter(h => h > 0).sort((a, b) => a - b);
+      const medH = hs.length ? hs[Math.floor(hs.length / 2)] : 0;
+      fresh = fresh
+        // Смотрим и на сырой текст: полировка умеет «починить» адрес сайта до
+        // нечитаемого «МАNГАВЛФФ.РИ», а мусор из обрывков каллиграфии — до
+        // формально словарных, но бессмысленных слов («ТАР ТТ ПА АДЕ ЕД»).
+        .filter(l => !isTitleOrMarker(l.rawText || l.text, l, 1, medH))
+        .filter(l => !isTitleOrMarker(l.text, l, 1, medH))
+        .filter(l => !looksLikeJunkLine(l.text));
       // Помечаем, на какой полосе нашлась реплика: в шторке видно, что
       // показано «на экране», а что распознано раньше с этой же страницы.
       const bandTop = band ? Math.round(band.y0) : 0;
@@ -7901,7 +7975,10 @@ const NATIVE_UI = {
       const total = (TTS && TTS.queue) ? TTS.queue.length : 0;
       const idx = (TTS && TTS.curIdx) ? TTS.curIdx : (total ? 1 : 0);
       const bands = (typeof Reader !== 'undefined' && Reader.bands) ? Reader.bands.length : 0;
-      const band = (typeof Reader !== 'undefined') ? (Reader.bandIndex | 0) + 1 : 0;
+      // Номер полосы не может быть больше их числа: на телефоне 00:01 панель
+      // показывала «полоса 3 из 1», потому что номер шёл из bandIndex, а всего
+      // полос считалось по другой величине. Если полос нет — пишем «1».
+      const band = Math.min((typeof Reader !== 'undefined' ? (Reader.bandIndex | 0) : 0) + 1, bands || 1);
       let voice = '';
       try { voice = VOICE.native() ? 'Android TTS' : 'Web Speech'; } catch (e) { voice = ''; }
       const paused = !!(TTS && TTS.paused);
@@ -8704,7 +8781,17 @@ function hideArrow() { $('#nextArrow').style.display = 'none'; }
  * текст, распознанный раньше. Пустые строки выпадают вместе со своими рамками.
  */
 async function cleanLines(lines) {
+  // Словарь разжимается асинхронно при запуске. Если книгу открыли раньше, чем
+  // он готов, весь ремонт слов молча выключался, и в буфере навсегда оставался
+  // сырой текст («ШКОЛ?», «ПОДУМАЛ АШ» — телефон 00:02). Ждём словарь здесь.
+  if (!Words.ready) { try { await Words.load(); } catch (e) { console.warn('словарь не готов', e); } }
   const keyOf = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  // Правила «что не реплика» (титул, «Гл. 48», адрес сайта, мусор из редких
+  // слов) должны действовать и на старый буфер: иначе после обновления человек
+  // снова видит в шторке титул, который я «уже убрал».
+  const hs = (lines || []).map(l => Number(l.height || (l.bottom - l.top)) || 0)
+    .filter(h => h > 0).sort((a, b) => a - b);
+  const medH = hs.length ? hs[Math.floor(hs.length / 2)] : 0;
   const out = [];
   for (const ln of lines) {
     // Мусорные края («*ь*.*о НЕ УВЕРЕН…») снимаем ПОСЛЕ словаря: обрывок
@@ -8727,6 +8814,9 @@ async function cleanLines(lines) {
     // Регистр: «ОНА Вс ШЕПЧЕТ» → «ОНА ВС ШЕПЧЕТ» (см. fixCaseInCaps).
     text = fixCaseInCaps(text);
     if (!text) continue;
+    if (isTitleOrMarker(String(ln.text || ''), ln, 1, medH)) continue;
+    if (isTitleOrMarker(text, ln, 1, medH)) continue;
+    if (looksLikeJunkLine(text)) continue;
     // Один и тот же текст в том же месте — дубль от полос прежней версии.
     const k = keyOf(text);
     const dup = k && out.some(o => keyOf(o.text) === k
