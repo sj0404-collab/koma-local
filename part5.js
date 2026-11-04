@@ -745,7 +745,14 @@ function bindUI() {
   $('#modeChips').onclick = (e) => {
     const chip = e.target.closest('.chip'); if (!chip) return;
     Reader.mode = chip.dataset.mode;
-    if (Reader.book) { Reader.book.mode = Reader.mode; DB.put('books', Reader.book); }
+    if (Reader.book) {
+      // Отметка «режим выбран человеком»: после неё автоподбор по пропорции
+      // страницы больше не вмешивается.
+      Reader.book.mode = Reader.mode;
+      Reader.book.modeUser = true;
+      Reader.modeUser = true;
+      DB.put('books', Reader.book);
+    }
     Reader.buildStrip().then(() => { Reader.syncSub(); syncSettingsUI(); });
   };
   $('#dirChips').onclick = (e) => {

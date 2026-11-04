@@ -16,6 +16,9 @@ const Reader = {
     this.pages = await Library.pages(book.id);
     if (!this.pages.length) return toast('В книге нет страниц');
     this.mode = book.mode || 'vertical';
+    // Выбирал ли режим сам человек. Если нет — режим можно подобрать по
+    // самой странице (манга-книжка или длинный свиток), см. onPageSized.
+    this.modeUser = !!book.modeUser;
     this.dir = book.dir || 'rtl';
     this.page = clamp(book.progress || 0, 0, this.pages.length - 1);
     this.regions.clear();
@@ -151,6 +154,19 @@ const Reader = {
     if (!this.canvases[i]) {
       // рабочий холст для OCR — один раз на страницу
       this.canvases[i] = canvasFromImage(img);
+    }
+    // Манга — это книжные страницы (пропорция около 0,7), манхва и вебтун —
+    // длинный свиток (0,2–0,4). Раньше ВСЁ открывалось лентой: человек читал
+    // мангу свитком и не понимал, почему. Если режим не выбран вручную —
+    // подбираем по странице: книжка → постранично справа налево.
+    if (i === 0 && !this.modeUser && this.mode === 'vertical'
+        && this.pages.length > 1 && ratio > 0.55) {
+      this.mode = 'rtl';
+      this.book.mode = 'rtl';
+      DB.put('books', this.book);
+      toast('Это страницы манги: открываю постранично, справа налево — как книжку', 5000);
+      setTimeout(() => { this.buildStrip().then(() => { this.syncSub(); if (typeof syncSettingsUI === 'function') syncSettingsUI(); }); }, 0);
+      return;
     }
     this.paintPage(i);
     if (i === this.page) this.afterPageReady();
