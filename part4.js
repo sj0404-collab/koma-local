@@ -2733,13 +2733,43 @@ function mergeBandLines(parts, canvas) {
       out.push(ln);
     }
   }
+  // Обрезанная реплика рядом с полной.
+  //
+  // Полоса — это то, что попало в экран. Если облачко выше экрана, полоса
+  // распознаёт только его нижнюю часть: «СКРЫВАЕШЬ ОТ МЕНЯ ВСЁ ЭТО ВРЕМЯ?…»
+  // вместо «ТЫ ДУМАЕШЬ Я НЕ ЗНАЛ О ТОМ ЧТО ТЫ СКРЫВАЕШЬ…». Соседняя полоса при
+  // этом даёт ЦЕЛУЮ реплику. Совпадением текста такие две не считались (тексты
+  // разные), по координатам тоже не совпадали — и в очереди чтения оказывались
+  // обе: сначала обрезок, потом целая (живой прогон в эмуляторе Aether Q,
+  // 04.11). Для человека это дефект: одну реплику порезали на две.
+  //
+  // Правило: если текст одной реплики ЦЕЛИКОМ входит в текст другой (и это не
+  // короткое «ДА!», а хотя бы 12 знаков и не меньше трети целой), то короткая —
+  // обрезок той же реплики, если она стоит там же по вертикали (полосы
+  // перекрываются) либо целиком лежит внутри вертикального охвата целой.
+  const norm = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const nearV = (a, b) => {
+    const ha = Math.max(1e-6, a.bottom - a.top), hb = Math.max(1e-6, b.bottom - b.top);
+    return overlapV(a, b) + Math.min(ha, hb) * 0.75 > 0;
+  };
+  const keep = out.filter((a) => !out.some((b) => {
+    if (a === b) return false;
+    const na = norm(a.text), nb = norm(b.text);
+    if (!na || !nb || na === nb) return false;
+    if (na.length < 12 || na.length < nb.length * 0.34) return false;
+    if (!nb.includes(na)) return false;
+    return nearV(a, b);
+  }));
+  const dropped = out.length - keep.length;
+  if (dropped > 0 && typeof OCR === 'object' && OCR) OCR.cutReplicas = dropped;
+
   // Порядок чтения: сверху вниз, а внутри строки — справа налево для манги.
   // Раньше здесь был простой `sort((a,b) => a.top - b.top)`, и он убивал
   // порядок: две реплики на одной высоте (или с разницей в 1–2 ‰) вставали по
   // левому краю, то есть для манги наоборот. Живой прогон 29.10: в нижней панели
   // «ОНА ВСЁ ЕЩЁ ШЕПЧЕТ» (справа) читалась ПОСЛЕДНЕЙ вместо первой.
   const rtl = (typeof Reader !== 'undefined' ? Reader.dir : 'rtl') !== 'ltr';
-  return orderBubbles(out, rtl);
+  return orderBubbles(keep, rtl);
 }
 
 async function onScrollSettled() {
