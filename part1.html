@@ -430,16 +430,45 @@
 <div class="sheet" id="sheetSettings">
   <div class="head">Как читать</div>
   <div class="body">
-    <div class="lbl">ПОРЯДОК ЧТЕНИЯ</div>
+    <!-- 1.0.21: два набора одних и тех же переключателей.
+         «Эта книга» — своё сочетание, оно и запоминается за книгой.
+         «По умолчанию» — то, что получат все остальные книги.
+         Раньше был один набор, и приходилось гадать, к чему он относится. -->
+    <div class="lbl" style="margin-top:8px">ЭТА КНИГА <span id="profState" class="hint"></span></div>
     <div class="chips" id="modeChips">
-      <button class="chip" data-mode="vertical">Вертикальная лента · манхва</button>
+      <button class="chip" data-mode="vertical">Лента · листаю сам, без голоса</button>
       <button class="chip" data-mode="rtl">Страницы справа налево · манга</button>
-      <button class="chip" data-mode="ltr">Страницы слева направо</button>
+      <button class="chip" data-mode="ltr">Страницы слева направо · комикс</button>
     </div>
-    <div class="lbl" style="margin-top:14px">НАПРАВЛЕНИЕ ЧТЕНИЯ</div>
+    <div class="lbl" style="margin-top:14px">НАЧАЛО ЧТЕНИЯ ДЛЯ ЭТОЙ КНИГИ</div>
     <div class="chips" id="dirChips">
       <button class="chip" data-dir="rtl">Справа налево (манга)</button>
-      <button class="chip" data-dir="ltr">Слева направо</button>
+      <button class="chip" data-dir="ltr">Слева направо (комикс)</button>
+    </div>
+    <label class="row" style="justify-content:space-between;padding:8px 0 2px">
+      <span>Голос у этой книги</span>
+      <input type="checkbox" id="cbVoiceBook">
+    </label>
+    <button class="btn" id="btnProfReset" style="margin-top:6px">Вернуть как по умолчанию</button>
+
+    <div class="lbl" style="margin-top:22px">ПО УМОЛЧАНИЮ — ДЛЯ ВСЕХ ОСТАЛЬНЫХ КНИГ</div>
+    <div class="chips" id="defModeChips">
+      <button class="chip" data-mode="vertical">Лента · листаю сам, без голоса</button>
+      <button class="chip" data-mode="rtl">Страницы справа налево · манга</button>
+      <button class="chip" data-mode="ltr">Страницы слева направо · комикс</button>
+    </div>
+    <div class="lbl" style="margin-top:14px">НАЧАЛО ЧТЕНИЯ ПО УМОЛЧАНИЮ</div>
+    <div class="chips" id="defDirChips">
+      <button class="chip" data-dir="rtl">Справа налево (манга)</button>
+      <button class="chip" data-dir="ltr">Слева направо (комикс)</button>
+    </div>
+    <label class="row" style="justify-content:space-between;padding:8px 0 2px">
+      <span>Голос по умолчанию</span>
+      <input type="checkbox" id="cbVoiceDefault">
+    </label>
+    <div class="hint" style="margin-top:6px">
+      Каждая книга помнит своё: режим, начало и голос. Книга, которую ты не настраивал,
+      берёт эти значения. Настройка одной книги другие не меняет.
     </div>
     <div class="lbl">СКОРОСТЬ РАСПОЗНАВАНИЯ</div>
     <div class="chips" id="speedChips">

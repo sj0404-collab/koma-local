@@ -1,5 +1,25 @@
 
 /* ───────────────────────── 8. Читалка ───────────────────────── */
+/**
+ * Настройки чтения ПО УМОЛЧАНИЮ (1.0.21).
+ *
+ * Требование 4.11: «я сам буду выбирать, если по умолчанию не то, и он будет
+ * запоминать именно то, что выбрано для текущей книги, а для других — возврат
+ * по умолчанию». Отсюда два уровня, и оба видны в ⚙:
+ *   · профиль книги — лежит в самой записи книги (mode, dir, voice, profUser);
+ *   · умолчание      — здесь, применяется к любой книге без профиля.
+ */
+const ReadDefaults = {
+  KEY: 'readdefaults',
+  v: { mode: 'vertical', dir: 'rtl', voice: false, startPage: 'first' },
+  async load() {
+    const row = await DB.get('kv', this.KEY);
+    if (row && row.v) this.v = Object.assign({}, this.v, row.v);
+    return this.v;
+  },
+  async save() { await DB.put('kv', { k: this.KEY, v: this.v }); },
+};
+
 const Reader = {
   book: null, pages: [], urls: [], canvases: [], imgEls: [],
   mode: 'vertical', dir: 'rtl', page: 0, frames: true, follow: true,
@@ -15,11 +35,15 @@ const Reader = {
     this.book = book;
     this.pages = await Library.pages(book.id);
     if (!this.pages.length) return toast('В книге нет страниц');
-    this.mode = book.mode || 'vertical';
-    // Выбирал ли режим сам человек. Если нет — режим можно подобрать по
-    // самой странице (манга-книжка или длинный свиток), см. onPageSized.
-    this.modeUser = !!book.modeUser;
-    this.dir = book.dir || 'rtl';
+    // Профиль книги главнее умолчания, но только если человек его задал.
+    // Никакого подбора «по пропорции страницы» больше нет: 4.11 — «выбирать
+    // каждый вручную». Автоподбор молча переключал книгу в страницы, и человек
+    // не понимал, почему лента перестала листаться сама.
+    const D = (typeof ReadDefaults !== 'undefined') ? ReadDefaults.v : { mode: 'vertical', dir: 'rtl', voice: false };
+    this.modeUser = !!book.profUser;
+    this.mode = this.modeUser && book.mode ? book.mode : (D.mode || 'vertical');
+    this.dir = this.modeUser && book.dir ? book.dir : (D.dir || 'rtl');
+    this.voiceOn = this.modeUser && typeof book.voice === 'boolean' ? book.voice : !!D.voice;
     this.page = clamp(book.progress || 0, 0, this.pages.length - 1);
     this.regions.clear();
     // Что уже прочитано — из базы: после остановки и даже перезапуска чтение
@@ -155,19 +179,8 @@ const Reader = {
       // рабочий холст для OCR — один раз на страницу
       this.canvases[i] = canvasFromImage(img);
     }
-    // Манга — это книжные страницы (пропорция около 0,7), манхва и вебтун —
-    // длинный свиток (0,2–0,4). Раньше ВСЁ открывалось лентой: человек читал
-    // мангу свитком и не понимал, почему. Если режим не выбран вручную —
-    // подбираем по странице: книжка → постранично справа налево.
-    if (i === 0 && !this.modeUser && this.mode === 'vertical'
-        && this.pages.length > 1 && ratio > 0.55) {
-      this.mode = 'rtl';
-      this.book.mode = 'rtl';
-      DB.put('books', this.book);
-      toast('Это страницы манги: открываю постранично, справа налево — как книжку', 5000);
-      setTimeout(() => { this.buildStrip().then(() => { this.syncSub(); if (typeof syncSettingsUI === 'function') syncSettingsUI(); }); }, 0);
-      return;
-    }
+    // Автоподбор режима по пропорции страницы УБРАН (1.0.21, требование 4.11:
+    // «выбирать каждый вручную»). Режим берётся из профиля книги, иначе из ⚙.
     this.paintPage(i);
     if (i === this.page) this.afterPageReady();
   },
@@ -234,7 +247,18 @@ const Reader = {
       if (RULES.autoScan) { this.hideStart(); this.scanCurrent(false); }
       else this.showStart();
     }
-    if (data && !staleFull) this.hideStart();     // страница уже распознана
+    if (data && !staleFull) {
+      this.hideStart();                          // страница уже распознана
+      // Голос у этой книги (1.0.21): если для книги он включён — читаем сами,
+      // один раз на страницу. В ленте по умолчанию голос выключен: человек
+      // листает сам.
+      if (this.voiceOn && this.voiceAutoPage !== i) {
+        this.voiceAutoPage = i;
+        setTimeout(() => {
+          try { TTS.prime(); TTS.readVisible(); } catch (e) { console.warn('авточтение', e); }
+        }, 250);
+      }
+    }
   },
 
   /**

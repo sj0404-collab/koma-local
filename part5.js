@@ -626,25 +626,67 @@ function bindUI() {
     if (!Reader.scrollBusy) TTS.readVisible();
   };
 
-  // настройки чтения
-  $('#modeChips').onclick = (e) => {
+  // ── настройки чтения: профиль книги и умолчание (1.0.21) ────────────────
+  /** Записать профиль текущей книги. Другие книги не трогаем — у них умолчание. */
+  const saveProfile = async (patch) => {
+    if (!Reader.book) return;
+    Reader.book = Object.assign({}, Reader.book, { profUser: true }, patch || {});
+    Reader.modeUser = true;
+    await DB.put('books', Reader.book);
+  };
+  $('#modeChips').onclick = async (e) => {
     const chip = e.target.closest('.chip'); if (!chip) return;
     Reader.mode = chip.dataset.mode;
-    if (Reader.book) {
-      // Отметка «режим выбран человеком»: после неё автоподбор по пропорции
-      // страницы больше не вмешивается.
-      Reader.book.mode = Reader.mode;
-      Reader.book.modeUser = true;
-      Reader.modeUser = true;
-      DB.put('books', Reader.book);
-    }
+    // Лента — это «листаю сам»: голос у книги выключаем, пока человек сам не
+    // включит его обратно тумблером ниже.
+    if (Reader.mode === 'vertical') Reader.voiceOn = false;
+    await saveProfile({ mode: Reader.mode, voice: Reader.voiceOn });
     Reader.buildStrip().then(() => { Reader.syncSub(); syncSettingsUI(); });
   };
-  $('#dirChips').onclick = (e) => {
+  $('#dirChips').onclick = async (e) => {
     const chip = e.target.closest('.chip'); if (!chip) return;
     Reader.dir = chip.dataset.dir;
-    if (Reader.book) { Reader.book.dir = Reader.dir; DB.put('books', Reader.book); }
+    await saveProfile({ dir: Reader.dir });
     Reader.rescanInDir();
+    syncSettingsUI();
+  };
+  if ($('#cbVoiceBook')) $('#cbVoiceBook').onchange = async (e) => {
+    Reader.voiceOn = !!e.target.checked;
+    await saveProfile({ voice: Reader.voiceOn });
+    toast(Reader.voiceOn
+      ? 'Эта книга читается вслух сама, как только страница распознана'
+      : 'Эта книга без голоса — листаешь сам', 3500);
+  };
+  if ($('#btnProfReset')) $('#btnProfReset').onclick = async () => {
+    if (!Reader.book) return;
+    const D = ReadDefaults.v;
+    Reader.book = Object.assign({}, Reader.book, {
+      profUser: false, mode: D.mode, dir: D.dir, voice: !!D.voice,
+    });
+    await DB.put('books', Reader.book);
+    Reader.modeUser = false;
+    Reader.mode = D.mode; Reader.dir = D.dir; Reader.voiceOn = !!D.voice;
+    Reader.buildStrip().then(() => { Reader.syncSub(); syncSettingsUI(); });
+    toast('Эта книга снова как по умолчанию', 3000);
+  };
+  // Умолчание — то, что получат все книги без своего профиля.
+  $('#defModeChips').onclick = async (e) => {
+    const chip = e.target.closest('.chip'); if (!chip) return;
+    ReadDefaults.v.mode = chip.dataset.mode;
+    if (chip.dataset.mode === 'vertical') ReadDefaults.v.voice = false;
+    await ReadDefaults.save();
+    syncSettingsUI();
+    toast('По умолчанию: ' + (chip.textContent || '').trim(), 3000);
+  };
+  $('#defDirChips').onclick = async (e) => {
+    const chip = e.target.closest('.chip'); if (!chip) return;
+    ReadDefaults.v.dir = chip.dataset.dir;
+    await ReadDefaults.save();
+    syncSettingsUI();
+  };
+  if ($('#cbVoiceDefault')) $('#cbVoiceDefault').onchange = async (e) => {
+    ReadDefaults.v.voice = !!e.target.checked;
+    await ReadDefaults.save();
     syncSettingsUI();
   };
   $('#cbAuto').onchange = (e) => {
@@ -731,6 +773,17 @@ function syncSettingsUI() {
         + ((typeof SPEED_NOTES !== 'undefined' && SPEED_NOTES[RULES.speed]) || ''));
   }
   $$('#dirChips .chip').forEach(c => c.classList.toggle('on', c.dataset.dir === (Reader.dir || 'rtl')));
+  // Умолчание и профиль книги видны отдельно, чтобы не гадать, что к чему.
+  const D = (typeof ReadDefaults !== 'undefined') ? ReadDefaults.v : null;
+  if (D) {
+    $$('#defModeChips .chip').forEach(c => c.classList.toggle('on', c.dataset.mode === D.mode));
+    $$('#defDirChips .chip').forEach(c => c.classList.toggle('on', c.dataset.dir === D.dir));
+    const cvd = $('#cbVoiceDefault'); if (cvd) cvd.checked = !!D.voice;
+  }
+  const cvb = $('#cbVoiceBook'); if (cvb) cvb.checked = !!Reader.voiceOn;
+  const ps = $('#profState');
+  if (ps) ps.textContent = !Reader.book ? 'книга не открыта'
+    : (Reader.modeUser ? 'своё, не как по умолчанию' : 'как по умолчанию');
   $('#cbSemi').checked = !!RULES.semiManual;
   $('#cbFrames').checked = Reader.frames;
   $('#cbFollow').checked = Reader.follow;
@@ -878,6 +931,7 @@ async function selfCheck() {
     const cb = $('#cbFrames'); if (cb) cb.checked = Reader.frames;
     Reader.paintAllFrames();
   });
+  await step('настройки чтения по умолчанию', () => ReadDefaults.load());
   await step('библиотека', () => Library.load());
   await step('модели: список', () => renderModels());
   await step('движок распознавания', () => {

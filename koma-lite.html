@@ -430,16 +430,45 @@
 <div class="sheet" id="sheetSettings">
   <div class="head">Как читать</div>
   <div class="body">
-    <div class="lbl">ПОРЯДОК ЧТЕНИЯ</div>
+    <!-- 1.0.21: два набора одних и тех же переключателей.
+         «Эта книга» — своё сочетание, оно и запоминается за книгой.
+         «По умолчанию» — то, что получат все остальные книги.
+         Раньше был один набор, и приходилось гадать, к чему он относится. -->
+    <div class="lbl" style="margin-top:8px">ЭТА КНИГА <span id="profState" class="hint"></span></div>
     <div class="chips" id="modeChips">
-      <button class="chip" data-mode="vertical">Вертикальная лента · манхва</button>
+      <button class="chip" data-mode="vertical">Лента · листаю сам, без голоса</button>
       <button class="chip" data-mode="rtl">Страницы справа налево · манга</button>
-      <button class="chip" data-mode="ltr">Страницы слева направо</button>
+      <button class="chip" data-mode="ltr">Страницы слева направо · комикс</button>
     </div>
-    <div class="lbl" style="margin-top:14px">НАПРАВЛЕНИЕ ЧТЕНИЯ</div>
+    <div class="lbl" style="margin-top:14px">НАЧАЛО ЧТЕНИЯ ДЛЯ ЭТОЙ КНИГИ</div>
     <div class="chips" id="dirChips">
       <button class="chip" data-dir="rtl">Справа налево (манга)</button>
-      <button class="chip" data-dir="ltr">Слева направо</button>
+      <button class="chip" data-dir="ltr">Слева направо (комикс)</button>
+    </div>
+    <label class="row" style="justify-content:space-between;padding:8px 0 2px">
+      <span>Голос у этой книги</span>
+      <input type="checkbox" id="cbVoiceBook">
+    </label>
+    <button class="btn" id="btnProfReset" style="margin-top:6px">Вернуть как по умолчанию</button>
+
+    <div class="lbl" style="margin-top:22px">ПО УМОЛЧАНИЮ — ДЛЯ ВСЕХ ОСТАЛЬНЫХ КНИГ</div>
+    <div class="chips" id="defModeChips">
+      <button class="chip" data-mode="vertical">Лента · листаю сам, без голоса</button>
+      <button class="chip" data-mode="rtl">Страницы справа налево · манга</button>
+      <button class="chip" data-mode="ltr">Страницы слева направо · комикс</button>
+    </div>
+    <div class="lbl" style="margin-top:14px">НАЧАЛО ЧТЕНИЯ ПО УМОЛЧАНИЮ</div>
+    <div class="chips" id="defDirChips">
+      <button class="chip" data-dir="rtl">Справа налево (манга)</button>
+      <button class="chip" data-dir="ltr">Слева направо (комикс)</button>
+    </div>
+    <label class="row" style="justify-content:space-between;padding:8px 0 2px">
+      <span>Голос по умолчанию</span>
+      <input type="checkbox" id="cbVoiceDefault">
+    </label>
+    <div class="hint" style="margin-top:6px">
+      Каждая книга помнит своё: режим, начало и голос. Книга, которую ты не настраивал,
+      берёт эти значения. Настройка одной книги другие не меняет.
     </div>
     <div class="lbl">СКОРОСТЬ РАСПОЗНАВАНИЯ</div>
     <div class="chips" id="speedChips">
@@ -625,7 +654,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.69';
+const VERSION = 'v1.9.70';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -6316,6 +6345,26 @@ const EDGE = {
 };
 
 /* ───────────────────────── 8. Читалка ───────────────────────── */
+/**
+ * Настройки чтения ПО УМОЛЧАНИЮ (1.0.21).
+ *
+ * Требование 4.11: «я сам буду выбирать, если по умолчанию не то, и он будет
+ * запоминать именно то, что выбрано для текущей книги, а для других — возврат
+ * по умолчанию». Отсюда два уровня, и оба видны в ⚙:
+ *   · профиль книги — лежит в самой записи книги (mode, dir, voice, profUser);
+ *   · умолчание      — здесь, применяется к любой книге без профиля.
+ */
+const ReadDefaults = {
+  KEY: 'readdefaults',
+  v: { mode: 'vertical', dir: 'rtl', voice: false, startPage: 'first' },
+  async load() {
+    const row = await DB.get('kv', this.KEY);
+    if (row && row.v) this.v = Object.assign({}, this.v, row.v);
+    return this.v;
+  },
+  async save() { await DB.put('kv', { k: this.KEY, v: this.v }); },
+};
+
 const Reader = {
   book: null, pages: [], urls: [], canvases: [], imgEls: [],
   mode: 'vertical', dir: 'rtl', page: 0, frames: true, follow: true,
@@ -6331,11 +6380,15 @@ const Reader = {
     this.book = book;
     this.pages = await Library.pages(book.id);
     if (!this.pages.length) return toast('В книге нет страниц');
-    this.mode = book.mode || 'vertical';
-    // Выбирал ли режим сам человек. Если нет — режим можно подобрать по
-    // самой странице (манга-книжка или длинный свиток), см. onPageSized.
-    this.modeUser = !!book.modeUser;
-    this.dir = book.dir || 'rtl';
+    // Профиль книги главнее умолчания, но только если человек его задал.
+    // Никакого подбора «по пропорции страницы» больше нет: 4.11 — «выбирать
+    // каждый вручную». Автоподбор молча переключал книгу в страницы, и человек
+    // не понимал, почему лента перестала листаться сама.
+    const D = (typeof ReadDefaults !== 'undefined') ? ReadDefaults.v : { mode: 'vertical', dir: 'rtl', voice: false };
+    this.modeUser = !!book.profUser;
+    this.mode = this.modeUser && book.mode ? book.mode : (D.mode || 'vertical');
+    this.dir = this.modeUser && book.dir ? book.dir : (D.dir || 'rtl');
+    this.voiceOn = this.modeUser && typeof book.voice === 'boolean' ? book.voice : !!D.voice;
     this.page = clamp(book.progress || 0, 0, this.pages.length - 1);
     this.regions.clear();
     // Что уже прочитано — из базы: после остановки и даже перезапуска чтение
@@ -6471,19 +6524,8 @@ const Reader = {
       // рабочий холст для OCR — один раз на страницу
       this.canvases[i] = canvasFromImage(img);
     }
-    // Манга — это книжные страницы (пропорция около 0,7), манхва и вебтун —
-    // длинный свиток (0,2–0,4). Раньше ВСЁ открывалось лентой: человек читал
-    // мангу свитком и не понимал, почему. Если режим не выбран вручную —
-    // подбираем по странице: книжка → постранично справа налево.
-    if (i === 0 && !this.modeUser && this.mode === 'vertical'
-        && this.pages.length > 1 && ratio > 0.55) {
-      this.mode = 'rtl';
-      this.book.mode = 'rtl';
-      DB.put('books', this.book);
-      toast('Это страницы манги: открываю постранично, справа налево — как книжку', 5000);
-      setTimeout(() => { this.buildStrip().then(() => { this.syncSub(); if (typeof syncSettingsUI === 'function') syncSettingsUI(); }); }, 0);
-      return;
-    }
+    // Автоподбор режима по пропорции страницы УБРАН (1.0.21, требование 4.11:
+    // «выбирать каждый вручную»). Режим берётся из профиля книги, иначе из ⚙.
     this.paintPage(i);
     if (i === this.page) this.afterPageReady();
   },
@@ -6550,7 +6592,18 @@ const Reader = {
       if (RULES.autoScan) { this.hideStart(); this.scanCurrent(false); }
       else this.showStart();
     }
-    if (data && !staleFull) this.hideStart();     // страница уже распознана
+    if (data && !staleFull) {
+      this.hideStart();                          // страница уже распознана
+      // Голос у этой книги (1.0.21): если для книги он включён — читаем сами,
+      // один раз на страницу. В ленте по умолчанию голос выключен: человек
+      // листает сам.
+      if (this.voiceOn && this.voiceAutoPage !== i) {
+        this.voiceAutoPage = i;
+        setTimeout(() => {
+          try { TTS.prime(); TTS.readVisible(); } catch (e) { console.warn('авточтение', e); }
+        }, 250);
+      }
+    }
   },
 
   /**
@@ -9770,25 +9823,67 @@ function bindUI() {
     if (!Reader.scrollBusy) TTS.readVisible();
   };
 
-  // настройки чтения
-  $('#modeChips').onclick = (e) => {
+  // ── настройки чтения: профиль книги и умолчание (1.0.21) ────────────────
+  /** Записать профиль текущей книги. Другие книги не трогаем — у них умолчание. */
+  const saveProfile = async (patch) => {
+    if (!Reader.book) return;
+    Reader.book = Object.assign({}, Reader.book, { profUser: true }, patch || {});
+    Reader.modeUser = true;
+    await DB.put('books', Reader.book);
+  };
+  $('#modeChips').onclick = async (e) => {
     const chip = e.target.closest('.chip'); if (!chip) return;
     Reader.mode = chip.dataset.mode;
-    if (Reader.book) {
-      // Отметка «режим выбран человеком»: после неё автоподбор по пропорции
-      // страницы больше не вмешивается.
-      Reader.book.mode = Reader.mode;
-      Reader.book.modeUser = true;
-      Reader.modeUser = true;
-      DB.put('books', Reader.book);
-    }
+    // Лента — это «листаю сам»: голос у книги выключаем, пока человек сам не
+    // включит его обратно тумблером ниже.
+    if (Reader.mode === 'vertical') Reader.voiceOn = false;
+    await saveProfile({ mode: Reader.mode, voice: Reader.voiceOn });
     Reader.buildStrip().then(() => { Reader.syncSub(); syncSettingsUI(); });
   };
-  $('#dirChips').onclick = (e) => {
+  $('#dirChips').onclick = async (e) => {
     const chip = e.target.closest('.chip'); if (!chip) return;
     Reader.dir = chip.dataset.dir;
-    if (Reader.book) { Reader.book.dir = Reader.dir; DB.put('books', Reader.book); }
+    await saveProfile({ dir: Reader.dir });
     Reader.rescanInDir();
+    syncSettingsUI();
+  };
+  if ($('#cbVoiceBook')) $('#cbVoiceBook').onchange = async (e) => {
+    Reader.voiceOn = !!e.target.checked;
+    await saveProfile({ voice: Reader.voiceOn });
+    toast(Reader.voiceOn
+      ? 'Эта книга читается вслух сама, как только страница распознана'
+      : 'Эта книга без голоса — листаешь сам', 3500);
+  };
+  if ($('#btnProfReset')) $('#btnProfReset').onclick = async () => {
+    if (!Reader.book) return;
+    const D = ReadDefaults.v;
+    Reader.book = Object.assign({}, Reader.book, {
+      profUser: false, mode: D.mode, dir: D.dir, voice: !!D.voice,
+    });
+    await DB.put('books', Reader.book);
+    Reader.modeUser = false;
+    Reader.mode = D.mode; Reader.dir = D.dir; Reader.voiceOn = !!D.voice;
+    Reader.buildStrip().then(() => { Reader.syncSub(); syncSettingsUI(); });
+    toast('Эта книга снова как по умолчанию', 3000);
+  };
+  // Умолчание — то, что получат все книги без своего профиля.
+  $('#defModeChips').onclick = async (e) => {
+    const chip = e.target.closest('.chip'); if (!chip) return;
+    ReadDefaults.v.mode = chip.dataset.mode;
+    if (chip.dataset.mode === 'vertical') ReadDefaults.v.voice = false;
+    await ReadDefaults.save();
+    syncSettingsUI();
+    toast('По умолчанию: ' + (chip.textContent || '').trim(), 3000);
+  };
+  $('#defDirChips').onclick = async (e) => {
+    const chip = e.target.closest('.chip'); if (!chip) return;
+    ReadDefaults.v.dir = chip.dataset.dir;
+    await ReadDefaults.save();
+    syncSettingsUI();
+  };
+  if ($('#cbVoiceDefault')) $('#cbVoiceDefault').onchange = async (e) => {
+    ReadDefaults.v.voice = !!e.target.checked;
+    await ReadDefaults.save();
     syncSettingsUI();
   };
   $('#cbAuto').onchange = (e) => {
@@ -9875,6 +9970,17 @@ function syncSettingsUI() {
         + ((typeof SPEED_NOTES !== 'undefined' && SPEED_NOTES[RULES.speed]) || ''));
   }
   $$('#dirChips .chip').forEach(c => c.classList.toggle('on', c.dataset.dir === (Reader.dir || 'rtl')));
+  // Умолчание и профиль книги видны отдельно, чтобы не гадать, что к чему.
+  const D = (typeof ReadDefaults !== 'undefined') ? ReadDefaults.v : null;
+  if (D) {
+    $$('#defModeChips .chip').forEach(c => c.classList.toggle('on', c.dataset.mode === D.mode));
+    $$('#defDirChips .chip').forEach(c => c.classList.toggle('on', c.dataset.dir === D.dir));
+    const cvd = $('#cbVoiceDefault'); if (cvd) cvd.checked = !!D.voice;
+  }
+  const cvb = $('#cbVoiceBook'); if (cvb) cvb.checked = !!Reader.voiceOn;
+  const ps = $('#profState');
+  if (ps) ps.textContent = !Reader.book ? 'книга не открыта'
+    : (Reader.modeUser ? 'своё, не как по умолчанию' : 'как по умолчанию');
   $('#cbSemi').checked = !!RULES.semiManual;
   $('#cbFrames').checked = Reader.frames;
   $('#cbFollow').checked = Reader.follow;
@@ -10022,6 +10128,7 @@ async function selfCheck() {
     const cb = $('#cbFrames'); if (cb) cb.checked = Reader.frames;
     Reader.paintAllFrames();
   });
+  await step('настройки чтения по умолчанию', () => ReadDefaults.load());
   await step('библиотека', () => Library.load());
   await step('модели: список', () => renderModels());
   await step('движок распознавания', () => {
