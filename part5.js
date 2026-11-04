@@ -709,10 +709,19 @@ function syncSettingsUI() {
   $$('#modeChips .chip').forEach(c => c.classList.toggle('on', c.dataset.mode === Reader.mode));
   $$('#speedChips .chip').forEach(c => c.classList.toggle('on', c.dataset.speed === RULES.speed));
   const hint = $('#speedHint');
-  if (hint) hint.textContent = (SPEED_NAMES[RULES.speed] || '')
-    + ' ' + (SPEED_APPROX[RULES.speed] || '')
-    + ' на страницу (замер на 720×2960). Медленнее — только для трудных страниц.'
-    + ((typeof SPEED_NOTES !== 'undefined' && SPEED_NOTES[RULES.speed]) || '');
+  if (hint) {
+    // На телефоне распознаёт НАТИВНЫЙ движок: один проход, и профиль скорости
+    // на текст не влияет вообще. Раньше подсказка обещала «≈80 с на страницу»
+    // и разное качество — человек проверил все профили и увидел, что разницы
+    // нет (жалоба 4.11). Обещать надо то, что есть.
+    const nat = (typeof NativeOcr !== 'undefined' && NativeOcr.chosen && NativeOcr.chosen() === 'native');
+    hint.textContent = (nat
+      ? (SPEED_NAMES[RULES.speed] || '') + ' — но на телефоне распознавание идёт '
+        + 'нативным движком одним проходом: профиль скорости на текст и на время не влияет.'
+      : (SPEED_NAMES[RULES.speed] || '') + ' ' + (SPEED_APPROX[RULES.speed] || '')
+        + ' на страницу (замер на 720×2960). Медленнее — только для трудных страниц.'
+        + ((typeof SPEED_NOTES !== 'undefined' && SPEED_NOTES[RULES.speed]) || ''));
+  }
   $$('#dirChips .chip').forEach(c => c.classList.toggle('on', c.dataset.dir === (Reader.dir || 'rtl')));
   $('#cbSemi').checked = !!RULES.semiManual;
   $('#cbFrames').checked = Reader.frames;

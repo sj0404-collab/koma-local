@@ -2077,6 +2077,15 @@ const TTS = {
         if (rest.length) { Reader.page = page; return this.readQueue(rest); }
 
         // ── Следующая страница ────────────────────────────────────────────
+        // Сам по себе голос за границу страницы НЕ едет (правило autoPage,
+        // по умолчанию выключено). Иначе выходило ровно то, на что пожаловались
+        // 4.11: страница 2 дочитана — и без единого нажатия голос уехал на 3-ю.
+        if (!RULES.autoPage) {
+          this.stop();
+          Reader.page = page;
+          toast('Страница ' + (page + 1) + ' дочитана. ▶ — следующая', 4000);
+          return;
+        }
         if (page < Reader.pages.length - 1) {
           const next = page + 1;
           await Reader.ensureLoaded(next);

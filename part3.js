@@ -28,6 +28,11 @@ const DEFAULT_RULES = {
   pipeline: true,          // читать, не дожидаясь конца полосы (замер в part4.js)
   hardVariants: true,      // на трудных строках перебирать подготовки и второй распознаватель
   autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
+  // Читать дальше САМО, когда реплики страницы кончились? По умолчанию нет.
+  // Жалоба 4.11: «не меняя страницу, он сам в фоне читает уже следующие» —
+  // человек слушал страницу 2, а голос уезжал на страницу 3 без его команды.
+  // Теперь на конце страницы чтение останавливается, и ▶ продолжает дальше.
+  autoPage: false,
   // Где считать распознавание: 'auto' — нативно в АПК (ONNX Runtime для Android),
   // иначе проверенный WASM в странице; 'native'/'wasm' — принудительно.
   // По умолчанию 'auto': на телефоне это быстрее, а если нативный движок не
@@ -125,6 +130,7 @@ function sanitizeRules(r, overrides) {
   num('variantStopShare', 0.5, 1);
   R.uncoveredPass = R.uncoveredPass !== false;
   R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
+  R.autoPage = R.autoPage === true;                        // дальше страницы — только по ▶
   R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
   R.breakWords = R.breakWords !== false;
   R.pipeline = R.pipeline !== false;     // конвейер включён; [{pipeline:false}] выключает
@@ -419,6 +425,294 @@ function glueBrokenHalves(text) {
  * «Ywb» превратится в «ушв», и мусор станет «словом»), потом добиваем двойников
  * и цифры, потом делим слипшееся и склеиваем переносы, потом регистр.
  */
+/**
+ * ── Словарная починка слов (1.9.64) ─────────────────────────────────────────
+ *
+ * Зачем. На телефоне движок режет облачко на узкие кропы, и настоящие слова
+ * приезжают кусками: «ПОЗ ДОРО ВА ТЬСЯ», «СМЩ ЕШЬ», «ТЕЛЕ ФО». Посимвольная
+ * чистка (двойники, 4→Ч) такое не собирает — она не знает, что
+ * «ПОЗДОРОВАТЬСЯ» вообще существует. Поэтому два шага:
+ *
+ *  1) mergeSplitTokens — склейка соседних кусков, если слиток образует слово
+ *     (или начало слова) из частых, а сами куски частыми словами не являются;
+ *  2) repairWordsByDict — поиск словаря на расстоянии 1–2 правки для тех
+ *     кусков, которые так и остались не словами: «ФРЫСТНО» → «ГРУСТНО».
+ *
+ * Оба шага молчат, пока словарь не загружен. Оба НИКОГДА не трогают слово,
+ * которое уже есть в словаре, — верное чтение важнее красивой догадки.
+ */
+
+/** Индекс словаря: по первой букве (для расстояний) и отсортированный (для начал). */
+let DICT_BUCKETS = null;
+let DICT_SORTED = null;
+function dictBuckets() {
+  if (DICT_BUCKETS) return DICT_BUCKETS;
+  DICT_BUCKETS = new Map();
+  const rank = (typeof Words !== 'undefined' && Words && Words.rank) || null;
+  if (!rank) return DICT_BUCKETS;
+  for (const [w, r] of rank) {
+    const k = w[0];
+    let arr = DICT_BUCKETS.get(k);
+    if (!arr) { arr = []; DICT_BUCKETS.set(k, arr); }
+    arr.push(w, r);                       // плоский список пар: [слово, ранг, слово, ранг…]
+  }
+  return DICT_BUCKETS;
+}
+function dictSorted() {
+  if (DICT_SORTED) return DICT_SORTED;
+  const rank = (typeof Words !== 'undefined' && Words && Words.rank) || null;
+  DICT_SORTED = rank ? Array.from(rank.keys()).sort() : [];
+  return DICT_SORTED;
+}
+/**
+ * Частые слова, разложенные по длине. Нужны там, где первая буква прочитана
+ * неверно («ФРЫСТНО» → «ГРУСТНО»): поиск по первой букве такое не найдёт, а
+ * перебрать 20 000 самых частых слов одной длины — дёшево (десятки сравнений
+ * на слово) и без риска уехать в редкое.
+ */
+let DICT_BY_LEN = null;
+function dictByLength() {
+  if (DICT_BY_LEN) return DICT_BY_LEN;
+  DICT_BY_LEN = new Map();
+  const rank = (typeof Words !== 'undefined' && Words && Words.rank) || null;
+  if (!rank) return DICT_BY_LEN;
+  const limit = Math.min(rank.size, 20000);
+  let i = 0;
+  for (const [w, r] of rank) {
+    if (r >= limit) break;
+    if (w.length < 5) continue;
+    let arr = DICT_BY_LEN.get(w.length);
+    if (!arr) { arr = []; DICT_BY_LEN.set(w.length, arr); }
+    arr.push(w, r);
+    if (++i > 25000) break;
+  }
+  return DICT_BY_LEN;
+}
+
+/** Начинается ли с `pre` хоть одно слово словаря. */
+function isDictPrefix(pre) {
+  const arr = dictSorted();
+  let lo = 0, hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] < pre) lo = mid + 1; else hi = mid;
+  }
+  return lo < arr.length && arr[lo].startsWith(pre);
+}
+
+/** Расстояние Левенштейна не больше max (иначе — сразу false, без полного счёта). */
+function levAtMost(a, b, max) {
+  const n = a.length, m = b.length;
+  if (Math.abs(n - m) > max) return false;
+  let prev = new Array(m + 1), cur = new Array(m + 1);
+  for (let j = 0; j <= m; j++) prev[j] = j;
+  for (let i = 1; i <= n; i++) {
+    cur[0] = i;
+    let best = cur[0];
+    const lo = Math.max(1, i - max), hi = Math.min(m, i + max);
+    for (let j = 1; j <= m; j++) {
+      if (j < lo || j > hi) { cur[j] = max + 1; continue; }
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      if (cur[j] < best) best = cur[j];
+    }
+    if (best > max) return false;
+    const t = prev; prev = cur; cur = t;
+  }
+  return prev[m] <= max;
+}
+
+/**
+ * Похожее слово из словаря для мусорного куска. Возвращает null, если не нашлось.
+ * Бюджет правок растёт с длиной (4–6 букв — одна, 7+ — две), первая буква
+ * неприкосновенна, а кандидат обязан быть частым: иначе «МОЖЕШЬ» уезжало в
+ * редкое слово с тем же расстоянием.
+ */
+function dictNearest(word) {
+  if (typeof Words === 'undefined' || !Words.ready || !Words.rank) return null;
+  const w = String(word || '').toLowerCase();
+  if (w.length < 5) return null;                            // «сапь»/«мап» — слишком коротко для догадки
+  if (Words.rank.has(w)) return null;                       // слово настоящее — не трогаем
+  const max = w.length >= 7 ? 2 : 1;
+  const bucket = dictBuckets().get(w[0]);
+  if (!bucket) return null;
+  const limit = Math.min(Words.COMMON_RANK || 20000, 20000);
+  let best = null, bestRank = Infinity;
+  for (let i = 0; i < bucket.length; i += 2) {
+    const cand = bucket[i], r = bucket[i + 1];
+    if (r > limit || r > bestRank) continue;
+    if (Math.abs(cand.length - w.length) > max) continue;
+    if (!levAtMost(w, cand, max)) continue;
+    best = cand; bestRank = r;
+  }
+  if (best) return best;
+  // Первая буква прочитана неверно («ФРЫСТНО» вместо «ГРУСТНО») — тогда по
+  // первой букве искать бессмысленно. Ищем среди 20 000 самых частых слов
+  // подходящей длины: там ошибка в первой букве ничего не стоит.
+  for (let len = Math.max(5, w.length - max); len <= w.length + max; len++) {
+    const arr = dictByLength().get(len);
+    if (!arr) continue;
+    for (let i = 0; i < arr.length; i += 2) {
+      const cand = arr[i], r = arr[i + 1];
+      if (r > 5000 || r > bestRank) continue;
+      if (!levAtMost(w, cand, max)) continue;
+      best = cand; bestRank = r;
+    }
+  }
+  return best;
+}
+
+/** Применить dictNearest к каждому слову строки, сохранив регистр. */
+function repairWordsByDict(text) {
+  if (typeof Words === 'undefined' || !Words.ready || !Words.rank) return text;
+  return String(text || '').replace(/[А-Яа-яЁё]{4,}/g, (w) => {
+    const fix = dictNearest(w);
+    if (!fix) return w;
+    return w === w.toUpperCase() ? fix.toUpperCase() : fix;
+  });
+}
+
+/**
+ * Слить соседние куски одного слова: «ПОЗ ДОРО ВА ТЬСЯ» → «ПОЗДОРОВАТЬСЯ».
+ *
+ * Условия узкие, иначе склейка съедала живую речь: «Я БЫ» → «ЯБЫ»,
+ * «А ПОЧЕМУ ТЫ» → «АПОЧЕМУ ТЫ». Склеиваем, только если:
+ *  • оба куска — чисто буквы (никакой пунктуации внутри);
+ *  • слиток — частое слово словаря ИЛИ начало частого слова (тогда «ТЕЛЕФО
+ *    ХОРОШО» собралось в «ТЕЛЕФОН»);
+ *  • хотя бы один кусок частым словом НЕ является (то есть это обрывок);
+ *  • в слитке не меньше 5 букв.
+ */
+function mergeSplitTokens(text) {
+  if (typeof Words === 'undefined' || !Words.ready || !Words.rank) return text;
+  const out = String(text || '').split(' ').filter(Boolean);
+  if (out.length < 2) return text;
+  const common = (w) => {
+    const r = Words.rank.get(String(w).toLowerCase());
+    return r !== undefined && r <= Words.KNOWN_RANK;
+  };
+  const pure = (t) => /^[А-Яа-яЁё]+$/.test(t);
+  // Дефис посреди слова — тоже разрыв движком: «ПОДР-УШ» → «ПОДР УШ». Но
+  // только когда слитно слова нет: «КОЕ-КОМУ» и «ЧТО-ТО» остаются как есть.
+  for (let i = out.length - 1; i >= 0; i--) {
+    const m = /^([А-Яа-яЁё]+)-([А-Яа-яЁё]+)$/.exec(out[i]);
+    if (!m) continue;
+    const r = Words.rank.get((m[1] + m[2]).toLowerCase());
+    if (r !== undefined && r <= Words.KNOWN_RANK) continue;
+    out.splice(i, 1, m[1], m[2]);
+  }
+  for (let pass = 0; pass < 3; pass++) {
+    let merged = false;
+    for (let i = 0; i < out.length - 1; i++) {
+      if (!pure(out[i]) || !pure(out[i + 1])) continue;
+      let acc = '', took = 0;
+      for (let k = 1; k <= 4 && i + k < out.length; k++) {
+        if (!pure(out[i + k])) break;
+        acc += out[i + k];
+        const whole = (out[i] + acc).toLowerCase();
+        if (whole.length < 5) continue;
+        const pieceLen = out[i + k].length;
+        const pieceCommon = common(out[i + k]);
+        let fits = false;
+        // Слиток — настоящее слово. Но если КАЖДЫЙ кусок сам по себе частое
+        // слово, это живая фраза, а не обрывок: «А ТО Мы» склеивалось в
+        // «АТОМЫ», «Я БЫ» — в «ЯБЫ».
+        const allCommon = [out[i]].concat(out.slice(i + 1, i + k + 1)).every(common);
+        // Обрывок в 1–2 буквы, который сам по себе настоящее слово, — это
+        // отдельное слово, а не хвост: «СОБИРА» + «л» склеивалось в «СОБРАЛ»
+        // (да, слово; нет, не то), а «СОБИРА» + «ЮСЬ» — в «СОБИРАЮСЬ».
+        const tinyWord = pieceCommon && pieceLen <= 2;
+        if (common(whole) && !allCommon && !tinyWord) fits = true;
+        else if (isDictPrefix(whole)) {
+          // Начало слова. Если голова сама по себе частое слово — это, скорее
+          // всего, живая пара («ПО ТЕЛЕ»), и склеивать её нельзя. Исключение —
+          // короткий обрывок в 1–3 буквы: «ТЕЛЕ ФО ХОРОШО» → «ТЕЛЕФОН».
+          if (!common(out[i])) fits = true;
+          else if (k === 1 && !pieceCommon && pieceLen <= 3) fits = true;
+        }
+        if (fits) { took = k; break; }
+      }
+      if (!took) continue;
+      const joined = out[i] + out.slice(i + 1, i + took + 1).join('');
+      out.splice(i, took + 1, joined);
+      merged = true;
+    }
+    if (!merged) break;
+  }
+  return out.join(' ');
+}
+
+/**
+ * Собрать слово из разорванных кусков, которые по отдельности словами не были:
+ * «ПОДР УШ ЖИ ЛИСЬ» → «ПОДРУЖИЛИСЬ», «СМЩ ЕШЬ» → «СМЕЕШЬ».
+ *
+ * Почему отдельный шаг, а не mergeSplitTokens: здесь слиток заведомо НЕ слово
+ * словаря («ПОДРУШЖИЛИСЬ»), поэтому работает только поиск ближайшего слова —
+ * и только среди слов на ту же букву, что у первого куска, чтобы «ПОДР ЖИЛИ»
+ * не превращалось в случайное слово с другим началом.
+ * Куски обязаны начинаться с настоящего мусора (не частого слова), иначе
+ * живая речь («ТЫ МЕНЯ») склеивалась бы в догадку.
+ */
+function dictNearestStrict(word) {
+  if (typeof Words === 'undefined' || !Words.ready || !Words.rank) return null;
+  const w = String(word || '').toLowerCase();
+  if (w.length < 5) return null;
+  if (Words.rank.has(w)) return null;
+  const max = w.length >= 7 ? 2 : 1;
+  const bucket = dictBuckets().get(w[0]);
+  if (!bucket) return null;
+  let best = null, bestRank = Infinity;
+  for (let i = 0; i < bucket.length; i += 2) {
+    const cand = bucket[i], r = bucket[i + 1];
+    if (r > bestRank || Math.abs(cand.length - w.length) > max) continue;
+    if (!levAtMost(w, cand, max)) continue;
+    best = cand; bestRank = r;
+  }
+  return best;
+}
+
+function spliceFragmentRuns(text) {
+  if (typeof Words === 'undefined' || !Words.ready || !Words.rank) return text;
+  const out = String(text || '').split(' ').filter(Boolean);
+  if (out.length < 2) return text;
+  const letters = (t) => (t.match(/[А-Яа-яЁё]+/g) || []).join('');
+  // Порог ниже общего: «ВОЛ» (40 481) — настоящее слово, но в реплике манги
+  // это почти всегда обрывок «ВОЛНУЙСЯ», и начинать склейку с него можно.
+  const common = (t) => {
+    const r = Words.rank.get(letters(t).toLowerCase());
+    return r !== undefined && r <= 20000;
+  };
+  /** Сколько первых букв совпадает у двух слов. */
+  const sharedStart = (a, b) => {
+    let k = 0;
+    while (k < a.length && k < b.length && a[k] === b[k]) k++;
+    return k;
+  };
+  for (let i = 0; i < out.length - 1; i++) {
+    if (common(out[i])) continue;                   // начало живой речи — не трогаем
+    if (!letters(out[i]) || letters(out[i]) !== out[i]) continue;
+    let acc = '', took = 0, fix = null;
+    for (let k = 1; k <= 3 && i + k < out.length; k++) {
+      const piece = letters(out[i + k]);
+      if (!piece) break;
+      acc += piece;
+      if (acc.length < 5) continue;
+      const cand = dictNearestStrict(out[i] + acc);
+      // Догадка принимается, только если начало слова уцелело: «ПОДР…» →
+      // «подружились» (общих первых букв четыре), а «УЫ…» → «уровень» (одна) —
+      // это уже не починка, а подмена.
+      if (cand && sharedStart(cand, (out[i] + acc).toLowerCase()) >= Math.min(2, out[i].length)) {
+        took = k; fix = cand; break;
+      }
+    }
+    if (!took) continue;
+    const tail = out[i + took].slice(letters(out[i + took]).length);   // «.Ш», «!»
+    const upper = /^[А-ЯЁ]/.test(out[i]);
+    out.splice(i, took + 1, (upper ? fix.toUpperCase() : fix) + (tail && tail.trim() ? tail.slice(0, 1) : ''));
+  }
+  return out.join(' ');
+}
+
 function polishLineText(raw) {
   let text = String(raw || '').replace(/\u00AD/g, '-').replace(/\s+/g, ' ').trim();
   if (!text) return '';
@@ -427,9 +721,12 @@ function polishLineText(raw) {
     .replace(/(^|[^A-Za-zА-Яа-яЁё])([A-Za-z]{1,4})([А-Яа-яЁё]{3,})/g, '$1$3');
   text = cyrifyInsideWords(fixLookalikes(text));
   text = splitGluedWords(text);
+  text = mergeSplitTokens(text);
+  text = spliceFragmentRuns(text);
   text = glueBrokenHalves(text);
   text = glueSplitWords(text);
   text = fixConfusedShortWords(text);
+  text = repairWordsByDict(text);
   text = fixCaseInCaps(text);
   return trimJunkEdges(text).trim();
 }
