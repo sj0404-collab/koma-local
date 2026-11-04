@@ -459,6 +459,7 @@
     </div>
     <div class="hint" id="engHint" style="margin-top:6px"></div>
     <button class="btn" id="btnProbe" style="margin-top:8px">Проверить чтецов на этой странице</button>
+    <button class="btn" id="btnAutoEngine" style="margin-top:6px">Подобрать чтеца по этой странице</button>
     <div id="engProbe" class="kv" style="margin-top:8px"></div>
     <button class="btn" id="btnProfReset" style="margin-top:10px">Вернуть как по умолчанию</button>
 
@@ -673,7 +674,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.72';
+const VERSION = 'v1.9.73';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -6412,7 +6413,9 @@ const Reader = {
     this.dir = this.modeUser && book.dir ? book.dir : (D.dir || 'rtl');
     this.voiceOn = this.modeUser && typeof book.voice === 'boolean' ? book.voice : !!D.voice;
     // Чтец распознавания: свой у книги, иначе общий. Пять пунктов в ⚙.
-    this.engine = this.modeUser && book.engine ? book.engine : (D.engine || 'auto');
+    // Чтеца мог выбрать человек (engineUser) или замер на странице (engineAuto).
+    this.engine = ((this.modeUser || book.engineUser || book.engineAuto) && book.engine)
+      ? book.engine : (D.engine || 'auto');
     this.page = clamp(book.progress || 0, 0, this.pages.length - 1);
     this.regions.clear();
     // Что уже прочитано — из базы: после остановки и даже перезапуска чтение
@@ -6621,6 +6624,12 @@ const Reader = {
       // Голос у этой книги (1.0.21): если для книги он включён — читаем сами,
       // один раз на страницу. В ленте по умолчанию голос выключен: человек
       // листает сам.
+      // Первое открытие книги: пусть приложение само замерит чтецов на этой
+      // странице и запомнит лучшего (по доле словарных слов). Один раз.
+      if (typeof window.__komaAutoEngine === 'function' && this.autoPickPage !== i) {
+        this.autoPickPage = i;
+        setTimeout(() => { try { window.__komaAutoEngine(); } catch (e) {} }, 900);
+      }
       if (this.voiceOn && this.voiceAutoPage !== i) {
         this.voiceAutoPage = i;
         setTimeout(() => {
@@ -9893,7 +9902,8 @@ function bindUI() {
   if ($('#engChips')) $('#engChips').onclick = async (e) => {
     const chip = e.target.closest('.chip'); if (!chip) return;
     Reader.engine = chip.dataset.eng || 'auto';
-    await saveProfile({ engine: Reader.engine });
+    // Выбрал человек — автоподбор больше не вмешивается в эту книгу.
+    await saveProfile({ engine: Reader.engine, engineUser: true, engineAuto: false });
     syncSettingsUI();
     toast('Чтец этой книги: ' + (ENG_NAMES[Reader.engine] || Reader.engine)
       + '. Текст будет распознан заново.', 3500);
@@ -9915,54 +9925,141 @@ function bindUI() {
     await ReadDefaults.save();
     syncSettingsUI();
   };
-  /**
-   * Проверка чтецов на ЭТОЙ странице (1.0.23).
-   *
-   * Мой замер на нарезанных строках с телефоном не сошёлся — значит, мерить
-   * надо там, где читает человек. Кнопка отдаёт кадр нативному движку, он
-   * прогоняет всех чтецов по тем же строкам и возвращает: сколько строк
-   * прочитано, сколько слов похоже на настоящие (по словарю) и время.
-   */
-  if ($('#btnProbe')) $('#btnProbe').onclick = async () => {
-    const box = $('#engProbe');
+  // ── проверка и ПОДБОР чтеца на этой странице (1.0.23–1.0.24) ────────────
+  // Мой стенд с телефоном не сошёлся, поэтому чтец подбирается замером на
+  // странице человека: прогоняем всех по одним строкам, считаем долю слов,
+  // которые есть в словаре, и берём лучшего. Это же число показывает таблица.
+  const probeNow = async () => {
     const b = (typeof NativeOcr !== 'undefined') ? NativeOcr.bridge() : null;
-    if (!b || typeof b.probeAsync !== 'function') {
-      if (box) box.textContent = 'Проверка работает только в приложении: в браузере чтецы не переключаются.';
-      return;
-    }
+    if (!b || typeof b.probeAsync !== 'function') return { ok: false, error: 'только в приложении' };
     const i = Reader.page;
     const canvas = Reader.canvases && Reader.canvases[i];
-    if (!canvas) { toast('Страница ещё не готова — подождите', 3000); return; }
-    if (box) box.textContent = 'Считаю всех чтецов на этой странице…';
+    if (!canvas) return { ok: false, error: 'страница не готова' };
     const cbId = 'p' + Date.now().toString(36);
     const prev = window.__komaOcrEvent;
-    const done = new Promise((resolve) => {
+    return new Promise((resolve) => {
       window.__komaOcrEvent = (id, type, data) => {
         if (id !== cbId) { if (typeof prev === 'function') prev(id, type, data); return; }
-        if (type === 'state') { if (box) box.textContent = 'Считаю… ' + data; return; }
-        if (type === 'done') { window.__komaOcrEvent = prev; let r = {}; try { r = JSON.parse(data || '{}'); } catch (e) {} resolve(r); }
+        if (type === 'state') {
+          const box = $('#engProbe');
+          if (box) box.textContent = 'Считаю… ' + data;
+          return;
+        }
+        if (type === 'done') {
+          window.__komaOcrEvent = prev;
+          let r = {};
+          try { r = JSON.parse(data || '{}'); } catch (e) {}
+          resolve(r);
+        }
       };
       try {
         const b64 = canvas.toDataURL('image/jpeg', 0.92).split(',')[1];
         b.probeAsync(b64, JSON.stringify({ pageSide: (typeof RULES !== 'undefined' && RULES.pageSide) || 1600 }), cbId);
       } catch (e) { window.__komaOcrEvent = prev; resolve({ ok: false, error: String(e) }); }
     });
-    const r = await done;
+  };
+  const bestOf = (r) => {
+    const list = (r && r.engines) || [];
+    let best = null;
+    for (const e of list) {
+      if (!e || !e.lines) continue;
+      // сначала доля словарных слов, при близких — кто прочитал больше строк
+      if (!best || (e.knownShare || 0) > (best.knownShare || 0) + 0.02
+          || (Math.abs((e.knownShare || 0) - (best.knownShare || 0)) <= 0.02 && e.lines > best.lines)) {
+        best = e;
+      }
+    }
+    return best;
+  };
+  const renderProbe = (r) => {
+    const box = $('#engProbe');
     if (!box) return;
-    if (!r.ok) { box.innerHTML = '<span style="color:#ff9b9b">Не получилось: ' + String(r.error || '') + '</span>'; return; }
+    if (!r.ok) {
+      box.innerHTML = '<span style="color:#ff9b9b">Не получилось: '
+        + escapeHtml(String(r.error || '')) + '</span>';
+      return;
+    }
     const rows = (r.engines || []).map(x => {
       const pct = Math.round((x.knownShare || 0) * 100);
       const good = pct >= 45 && x.lines > 0;
-      return `<tr><td>${ENG_NAMES[x.engine] || x.engine}</td><td>${x.lines}/${x.of}</td>`
-        + `<td style="color:${good ? '#8fe0b0' : '#ffb4b4'}">${pct} %</td>`
-        + `<td>${(x.ms / 1000).toFixed(1)} с</td></tr>`;
+      return '<tr><td>' + (ENG_NAMES[x.engine] || x.engine) + '</td><td>' + x.lines + '/' + x.of + '</td>'
+        + '<td style="color:' + (good ? '#8fe0b0' : '#ffb4b4') + '">' + pct + ' %</td>'
+        + '<td>' + (x.ms / 1000).toFixed(1) + ' с</td></tr>';
     }).join('');
     box.innerHTML = '<table style="width:100%;font-size:12px">'
       + '<tr><th>чтец</th><th>строк</th><th>слов по словарю</th><th>время</th></tr>'
       + rows + '</table><div class="hint" style="margin-top:6px">'
-      + 'Сравнивай «слов по словарю»: это доля прочитанных слов, которые есть в русском словаре. '
-      + 'Ниже 45 % — чтец на этой странице не годится.</div>';
+      + 'Слов по словарю — доля прочитанных слов, которые есть в русском словаре. '
+      + 'Ниже 45 % чтец на этой странице не годится.</div>';
   };
+  /** Применить чтеца к книге (запоминается у неё одной). */
+  const applyEngine = async (eng, why, user) => {
+    Reader.engine = eng;
+    if (Reader.book) {
+      Reader.book = Object.assign({}, Reader.book, {
+        engine: eng, engineAuto: !user, engineUser: !!user,
+      });
+      await DB.put('books', Reader.book);
+      // Текст прежним чтецом больше не годится — стираем его у этой книги.
+      try {
+        const rows = (await DB.all('kv') || []).filter(r => typeof r.k === 'string'
+          && r.k.startsWith('buf:' + Reader.book.id + ':'));
+        for (const r of rows) await DB.del('kv', r.k);
+      } catch (e) { /* не критично */ }
+      Reader.regions.clear(); Reader.bandCache.clear();
+      if (Reader.paintAllFrames) Reader.paintAllFrames();
+    }
+    syncSettingsUI();
+    if (why) toast(why, 5000);
+  };
+
+  if ($('#btnProbe')) $('#btnProbe').onclick = async () => {
+    const box = $('#engProbe');
+    if (box) box.textContent = 'Считаю всех чтецов на этой странице…';
+    const r = await probeNow();
+    renderProbe(r);
+    const best = bestOf(r);
+    if (!r.ok || !best) return;
+    const list = r.engines || [];
+    const second = list.filter(e => e !== best && e.lines).sort((a, b) => (b.knownShare || 0) - (a.knownShare || 0))[0];
+    const cmp = second
+      ? ' (' + Math.round((best.knownShare || 0) * 100) + ' % против ' + Math.round((second.knownShare || 0) * 100) + ' %)'
+      : '';
+    await applyEngine(best.engine, 'Чтец этой книги выбран по замеру: ' + (ENG_NAMES[best.engine] || best.engine) + cmp, false);
+  };
+  if ($('#btnAutoEngine')) $('#btnAutoEngine').onclick = async () => {
+    const r = await probeNow();
+    renderProbe(r);
+    const best = bestOf(r);
+    if (!r.ok || !best) return;
+    await applyEngine(best.engine, 'Подобрано: ' + (ENG_NAMES[best.engine] || best.engine), false);
+  };
+
+  // Автоподбор чтеца при первом открытии книги: один раз, только если человек
+  // сам не выбирал. Иначе «по словарю» опять решает за него.
+  window.__komaAutoEngine = async function () {
+    try {
+      if (!Reader.book || Reader.book.engineUser) return;
+      if (Reader.book.engineAuto) return;
+      const b = (typeof NativeOcr !== 'undefined') ? NativeOcr.bridge() : null;
+      if (!b || typeof b.probeAsync !== 'function') return;
+      if (!Reader.canvases || !Reader.canvases[Reader.page]) return;
+      const r = await probeNow();
+      const best = bestOf(r);
+      if (!r.ok || !best) return;
+      if ((best.knownShare || 0) < 0.3) return;      // мерить не на чем — не трогаем
+      const cur = Reader.engine || 'auto';
+      if (best.engine === cur) {
+        Reader.book = Object.assign({}, Reader.book, { engineAuto: true });
+        await DB.put('books', Reader.book);
+        return;
+      }
+      await applyEngine(best.engine, 'Для этой книги чтец выбран замером на странице: '
+        + (ENG_NAMES[best.engine] || best.engine) + ' (' + Math.round((best.knownShare || 0) * 100)
+        + ' % слов по словарю). Поменять — ⚙ → ЧТЕЦ ДЛЯ ЭТОЙ КНИГИ', false);
+    } catch (e) { console.warn('автоподбор чтеца', e); }
+  };
+
   if ($('#btnProfReset')) $('#btnProfReset').onclick = async () => {
     if (!Reader.book) return;
     const D = ReadDefaults.v;

@@ -14,8 +14,8 @@ with sync_playwright() as pw:
         status: () => JSON.stringify({ ready: true, engine: 'native', engines: ['auto','rec','eslav','r3','r4'] }),
         probeAsync: (b64, rules, cbId) => {
           setTimeout(() => window.__komaOcrEvent(cbId, 'done', JSON.stringify({ ok: true, boxes: 3, engines: [
-            { engine: 'rec', lines: 8, of: 8, words: 20, knownShare: 0.85, ms: 1200, samples: [] },
-            { engine: 'eslav', lines: 8, of: 8, words: 18, knownShare: 0.52, ms: 400, samples: [] },
+            { engine: 'rec', lines: 8, of: 8, words: 20, knownShare: 0.41, ms: 1200, samples: [] },
+            { engine: 'eslav', lines: 8, of: 8, words: 18, knownShare: 0.66, ms: 400, samples: [] },
             { engine: 'r3', lines: 2, of: 8, words: 4, knownShare: 0.05, ms: 350, samples: [] },
           ] })), 10);
         },
@@ -77,7 +77,13 @@ with sync_playwright() as pw:
     p.wait_for_timeout(1200)
     probe = p.evaluate("() => (document.querySelector('#engProbe') || {}).textContent || ''")
     print('таблица проверки:', probe.replace('\n', ' ')[:150])
-    probe_ok = '85' in probe and 'rec' in probe
+    # кнопка проверки должна не только нарисовать таблицу, но и ВЫБРАТЬ лучшего
+    picked = p.evaluate("""async () => ({
+      eng: Reader.engine,
+      saved: await DB.get('books','bookA').then(b => ({e: b.engine, auto: !!b.engineAuto, user: !!b.engineUser})),
+    })""")
+    print('после кнопки проверки:', picked)
+    probe_ok = '66' in probe and 'rec' in probe and picked['eng'] == 'eslav' and picked['saved']['auto']
     print('проверка чтецов:', 'ок' if probe_ok else 'ПЛОХО')
     ok = (st['eng'] == 'r3' and st['saved'] == 'r3' and sent and sent[0] == 'r3'
           and bb['eng'] == 'auto' and a2['eng'] == 'r3' and a2['def'] == 'eslav')

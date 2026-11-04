@@ -45,7 +45,9 @@ const Reader = {
     this.dir = this.modeUser && book.dir ? book.dir : (D.dir || 'rtl');
     this.voiceOn = this.modeUser && typeof book.voice === 'boolean' ? book.voice : !!D.voice;
     // Чтец распознавания: свой у книги, иначе общий. Пять пунктов в ⚙.
-    this.engine = this.modeUser && book.engine ? book.engine : (D.engine || 'auto');
+    // Чтеца мог выбрать человек (engineUser) или замер на странице (engineAuto).
+    this.engine = ((this.modeUser || book.engineUser || book.engineAuto) && book.engine)
+      ? book.engine : (D.engine || 'auto');
     this.page = clamp(book.progress || 0, 0, this.pages.length - 1);
     this.regions.clear();
     // Что уже прочитано — из базы: после остановки и даже перезапуска чтение
@@ -254,6 +256,12 @@ const Reader = {
       // Голос у этой книги (1.0.21): если для книги он включён — читаем сами,
       // один раз на страницу. В ленте по умолчанию голос выключен: человек
       // листает сам.
+      // Первое открытие книги: пусть приложение само замерит чтецов на этой
+      // странице и запомнит лучшего (по доле словарных слов). Один раз.
+      if (typeof window.__komaAutoEngine === 'function' && this.autoPickPage !== i) {
+        this.autoPickPage = i;
+        setTimeout(() => { try { window.__komaAutoEngine(); } catch (e) {} }, 900);
+      }
       if (this.voiceOn && this.voiceAutoPage !== i) {
         this.voiceAutoPage = i;
         setTimeout(() => {
