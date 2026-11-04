@@ -29,6 +29,7 @@ with sync_playwright() as pw:
       await openBook(b);
     }""")
     p.wait_for_timeout(2500)
+    p.wait_for_timeout(6000)          # ждём, пока уйдёт всплывающая подсказка
     p.screenshot(path='/home/user/uploads/ui-reader.png')
     # панели скрыты тапом (погружение)
     p.evaluate("() => { document.querySelector('#readerBar').classList.add('hide'); document.querySelector('#readerHeader').style.transform='translateY(-110%)'; }")

@@ -54,7 +54,7 @@ with sync_playwright() as pw:
     p = b.new_page(viewport={'width': 390, 'height': 844})
     errs = []
     p.on('pageerror', lambda e: errs.append(str(e)))
-    p.goto('file:///home/user/kl/koma-web.html', wait_until='domcontentloaded')
+    p.goto('file:///home/user/kl/koma-lite.html', wait_until='domcontentloaded')
     p.wait_for_timeout(1500)
     M = '/home/user/koma-lab/models2/'
     p.set_input_files('#modelPick', [M + 'detection.onnx', M + 'cyrillic.onnx', M + 'cyrillic.txt'])

@@ -204,13 +204,17 @@
     border:1px solid #ffffff12;backdrop-filter:blur(12px)}
   .startCard{background:#12161ce8;border:1px solid #ffffff12;border-radius:18px;
     bottom:calc(78px + env(safe-area-inset-bottom));box-shadow:0 16px 40px #000000b0}
-  .startCard .t{font-size:16px}
+  .startCard .t{font-size:16px;padding-right:38px}
+  .startCard .hint{padding-right:38px}
+  /* Три кнопки в ряд не влезали: «Распознать текст» переносился в две строки,
+     а «Читать вслух» вылезала за карточку. Теперь две колонки, а «✕» — в углу. */
+  .startCard .acts{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
   .startCard .acts .btn{background:var(--panel2);border-radius:20px;height:44px;font-size:13.5px;
-    font-weight:550;justify-content:center}
-  .startCard .acts .btn.primary{background:var(--accent);color:#fff}
-  #startCard .acts .btn#btnStartRead{background:var(--accent);color:#fff}
-  #startCard .acts .btn#btnStartClose{background:transparent;border:1px solid #ffffff1a;
-    flex:0 0 48px;min-width:48px}
+    font-weight:550;justify-content:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    min-width:0;flex:none;margin:0;width:auto;padding:0 10px}
+  #startCard .acts #btnStartRead{background:var(--accent);color:#fff}
+  #startCard .acts #btnStartClose{position:absolute;top:10px;right:10px;width:32px;height:32px;
+    min-height:32px;border-radius:50%;background:#ffffff12;border:0;padding:0;font-size:14px}
   .bottombar .roundbtn.dim,#btnFrames{background:var(--panel2);color:#e8ecf2}
   .bottombar .roundbtn#btnRead{background:var(--accent)}
   .sheet{background:#12161c;border:1px solid #ffffff0f;border-bottom:0}
