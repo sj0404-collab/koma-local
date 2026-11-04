@@ -2752,13 +2752,21 @@ function mergeBandLines(parts, canvas) {
     const ha = Math.max(1e-6, a.bottom - a.top), hb = Math.max(1e-6, b.bottom - b.top);
     return overlapV(a, b) + Math.min(ha, hb) * 0.75 > 0;
   };
+  const overlapH = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left);
+  const samePlace = (a, b) => {
+    if (!nearV(a, b)) return false;
+    const wa = Math.max(1e-6, a.right - a.left), wb = Math.max(1e-6, b.right - b.left);
+    return overlapH(a, b) > Math.min(wa, wb) * 0.4;
+  };
   const keep = out.filter((a) => !out.some((b) => {
     if (a === b) return false;
     const na = norm(a.text), nb = norm(b.text);
     if (!na || !nb || na === nb) return false;
-    if (na.length < 12 || na.length < nb.length * 0.34) return false;
+    // Совсем короткое («ДА!», «НЕТ») не трогаем: это может быть своя реплика.
+    if (na.length < 6) return false;
     if (!nb.includes(na)) return false;
-    return nearV(a, b);
+    // Обрезок стоит в том же облачке: рядом по вертикали И по горизонтали.
+    return samePlace(a, b);
   }));
   const dropped = out.length - keep.length;
   if (dropped > 0 && typeof OCR === 'object' && OCR) OCR.cutReplicas = dropped;
