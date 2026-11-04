@@ -36,6 +36,18 @@ cd apk && gradle assembleDebug
 проверит, что онлайн-путей не осталось (ни INTERNET в манифесте, ни Lens, ни
 загрузчика обновлений в исходниках).
 
+## Тесты
+
+```bash
+node tools/test_glue.cjs        # слово, разорванное переносом: «ВЛ ИТЬ» → «ВЛИТЬ»
+python3 tools/measure.py --image data/real/dense-a.jpg --expected data/real/dense-expected.json
+```
+
+`tools/test_glue.cjs` берёт НАСТОЯЩИЙ вшитый словарь (part0-dict.js) и настоящий
+исходник функции из part3.js, поэтому проверяет то, что реально попадёт в голос.
+`tools/measure.py` меряет время распознавания и сверяет реплики с эталоном по
+словам (CER, пропуски).
+
 ## Установка
 
 `applicationId` тот же (`net.koma.reader`) и ключ подписи тот же, что у прежней

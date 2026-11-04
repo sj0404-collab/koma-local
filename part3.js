@@ -258,8 +258,82 @@ function cleanSpeech(raw) {
   for (let k = 0; k < 3; k++) {
     text = text.replace(/(?<!\p{L})\p{L}(\s+\p{L}){1,4}(?!\p{L})/gu, m => m.replace(/\s+/g, ''));
   }
+  // Перенос по слогам без дефиса: «ВЛ ИТЬ» → «ВЛИТЬ», «ВОЛ НУ ЕТСЯ» → «ВОЛНУЕТСЯ».
+  // Делается ПОСЛЕ склейки однобуквенных обрывков: там правило совсем узкое
+  // (одна буква), а перенос в манге — это 2–3 буквы в конце строки и остаток
+  // слова в начале следующей.
+  text = glueSplitWords(text);
   // Обрывок звукового эффекта перед/после реплики — не часть текста.
   return trimJunkEdges(text).trim();
+}
+
+/**
+ * СЛОВО, РАЗОРВАННОЕ ПЕРЕНОСОМ, — ОДНО СЛОВО, а не два.
+ *
+ * Жалоба (4.11): «он ещё слово на две части разбивает и читает не как одно
+ * целое, а как два разных: Вл ить, Вол нуе…». На странице это нормальный
+ * перенос манги: «ОН ВОЛ-» / «НУЕТСЯ». Чтец возвращал КАЖДУЮ рамку отдельным
+ * «словом», а дефис в конце строки часто не видит вовсе (тонкая черта на
+ * границе облачка), поэтому «ВОЛ-» превращалось в «ВОЛ», и голос читал
+ * «вол ну ется» — три слова вместо одного.
+ *
+ * Правило честное и проверяемое по словарю: склеиваем окно из 2–4 соседних
+ * слов, ТОЛЬКО если
+ *   • все части — чистые буквы (ни запятых, ни точек);
+ *   • в словаре есть ровно СКЛЕЕННОЕ слово;
+ *   • в окне есть настоящий обрывок — слово короче четырёх букв или слово,
+ *     которого в словаре нет.
+ * Без третьего условия «ДА НЕТ» и «ОН ШЁЛ» склеивались бы в мусор: оба слова
+ * настоящие, а «данет» в словаре нет — но проверка не должна зависеть от того,
+ * что случайно оказалось в словаре.
+ */
+function glueSplitWords(text) {
+  const src = String(text || '');
+  if (typeof Words === 'undefined' || !Words.ready) return src;
+  const parts = src.split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return src;
+  // «Обрывок» — слово, которого нет среди ЧАСТЫХ. Именно isKnown, а не inDict:
+  // в словаре на 487 000 словоформ есть и «ется» (позиция 297 136), и «вл»
+  // (16 050), поэтому «просто есть в словаре» обрывок не выдаёт. Частым же
+  // «ется» и «ить» не бывает никогда.
+  const dict = (w) => {
+    const low = String(w).toLowerCase().replace(/[^\p{L}]/gu, '');
+    return low.length >= 1 && !!Words.isKnown(low);
+  };
+  const plain = /^[\p{L}]+$/u;
+  const out = [];
+  let i = 0;
+  while (i < parts.length) {
+    let take = 1, merged = null;
+    const maxK = Math.min(4, parts.length - i);
+    for (let k = maxK; k >= 2; k--) {
+      const win = parts.slice(i, i + k);
+      if (!win.every(w => plain.test(w))) continue;
+      const cat = win.join('');
+      if (cat.length < 4 || cat.length > 24) continue;
+      if (!Words.inDict(cat.toLowerCase())) continue;
+      const unknown = win.filter(w => !dict(w)).length;
+      const shortFrag = win.filter(w => w.length <= 3 && !dict(w)).length;
+      // Третий, самый узкий случай: ОБЕ части по 1–3 буквы и склейка — частое
+      // слово. Так выглядит «ДЕ ЛО», «ПО ТОМ», «ТО ЖЕ», где обе половины по
+      // отдельности тоже слова и по словарю неразличимы. Для озвучки склейка
+      // безопасна: «тоже» и «то же» звучат одинаково.
+      const bothShort = win.length === 2 && win.every(w => w.length <= 3)
+        && !!Words.isKnown(cat.toLowerCase());
+      if (!unknown && !shortFrag && !bothShort) continue;   // два настоящих слова подряд
+      if (unknown > 1 && win.length > 3) continue;      // склеили бы целую фразу
+      // Регистр: если в окне есть часть, набранная капсом, всё слово — капсом.
+      // Манга набрана капсом, и смешанный регистр тут всегда ошибка чтеца
+      // («ВЛ ить» → «ВЛИТЬ»), а не замысел.
+      const anyCaps = win.some(w => w.length >= 2 && w === w.toUpperCase());
+      merged = anyCaps ? cat.toUpperCase() : cat;
+      take = k;
+      break;
+    }
+    if (merged) { out.push(merged); i += take; }
+    else { out.push(parts[i]); i += 1; }
+  }
+  return out.join(' ');
 }
 
 /**
@@ -893,6 +967,9 @@ const Words = {
       t = t.replace(/[А-Яа-яЁё]+/g, w => this.correctWord(w));
       if (!keepAll) t = this.stripJunkWords(t);
     }
+    // Ещё раз склейка переноса: до этого слова уже могли быть поделены
+    // «слипшиеся слова» и словарная правка («ВОЛ» + «НУЕТСЯ» остались двумя).
+    t = glueSplitWords(t);
     return t.replace(/(?<=\p{L})-\s*$/u, '').trim();
   },
   /**
@@ -3366,7 +3443,15 @@ function bubblesOf(group, rtl, R) {
       // реплика» на 75 слов (замер 28.10).
       const mergedTop = Math.min(...block.map(r => r.top), rg.top);
       const mergedBottom = Math.max(...block.map(r => r.bottom), rg.bottom);
-      if (mergedBottom - mergedTop > 0.22) continue;
+      // Потолок высоты. Плотная строка за строкой (межстрочный зазор меньше
+      // 0,65 высоты строки) — это ОДНО облачко, даже если оно выше 22 %
+      // страницы: на странице было «высокое облачко на 6 строк», и чтец
+      // разрывал его на две реплики, а потом ещё и читал их не по порядку
+      // (жалоба 4.11: «некоторые читает только одну строку из нескольких»).
+      // Для РАЗРЕЖЕННОГО текста (проза, колонки) потолок остаётся 0.22.
+      const vgap = rg.top - head.bottom;
+      const tightRows = vgap <= lineHeight * 0.9;
+      if (mergedBottom - mergedTop > (tightRows ? 0.42 : 0.22)) continue;
       if (gap < bestGap) { bestGap = gap; target = block; }
     }
     if (target) target.push(rg); else blocks.push([rg]);
@@ -3378,16 +3463,27 @@ function bubblesOf(group, rtl, R) {
   // четверти страницы, а если и выше — его строки идут плотно, и разрез по
   // самому большому пробелу всё равно придётся на пустое место.
   const MAX_BLOCK = 0.22;                      // доля высоты страницы
+  const MAX_TIGHT = 0.42;                      // плотное облачко — до 42 %
   const splitTall = (block) => {
     if (block.length < 4) return [block];
     const span = (b) => Math.max(...b.map(r => r.bottom)) - Math.min(...b.map(r => r.top));
-    if (span(block) <= MAX_BLOCK) return [block];
     const sortedB = block.slice().sort((a, b) => a.top - b.top);
+    const gaps = [];
+    for (let i = 1; i < sortedB.length; i++) gaps.push(sortedB[i].top - sortedB[i - 1].bottom);
+    const lgGaps = gaps.slice().sort((a, b) => a - b);
+    const medianGap = lgGaps[lgGaps.length >> 1] || 0;
+    const lineH = block.reduce((acc, r) => acc + (r.bottom - r.top), 0) / block.length;
+    // Плотная строка за строкой — одно облачко: режем его только по ЯВНО
+    // большему пробелу (между двумя облачками он всегда вдвое-втрое больше
+    // обычного межстрочного). Иначе высокое облачко рвалось на реплики.
+    const tight = medianGap <= lineH * 0.9;
+    if (span(block) <= (tight ? MAX_TIGHT : MAX_BLOCK)) return [block];
     let cut = -1, bestGap = 0;
     for (let i = 1; i < sortedB.length; i++) {
       const gap = sortedB[i].top - sortedB[i - 1].bottom;
       if (gap > bestGap) { bestGap = gap; cut = i; }
     }
+    if (tight && bestGap < Math.max(medianGap * 1.6, lineH * 0.65)) return [block];
     if (cut < 0) return [block];
     const a = sortedB.slice(0, cut), b = sortedB.slice(cut);
     return [...splitTall(a), ...splitTall(b)];
@@ -3443,7 +3539,13 @@ function bubblesOf(group, rtl, R) {
     // тонкая строка навсегда занижала lh, и следующие строки облачка уже не
     // приклеивались (та же жалоба «реплика разрезана»).
     box.rows = Math.max(1, rows.length);
-    box.lh = (box.bottom - box.top) / box.rows;
+    // Высоты отдельных строк — для МЕДИАНЫ. Раньше «типичная строка» считалась
+    // как вся высота блока / число строк, и одна строка с выносными элементами
+    // («ТЫ ДУМАЕШЬ Я НЕ ЗНАЛ» набрана выше остальных) завышала её в полтора
+    // раза: следующая строка переставала приклеиваться, и высокое облачко
+    // разваливалось на две реплики (замер 4.11).
+    box.hs = rows.map(r => Math.max(r.bottom - r.top, 1e-6));
+    box.lh = median(box.hs) || (box.bottom - box.top) / box.rows;
     return box;
   });
   // Строки одного облачка — в ОДНУ реплику, обрывки — в соседнюю (как в АПК:
@@ -3511,7 +3613,10 @@ function sameBubble(a, b, bubbleGap, mergeHeightRatio) {
   // Тот же потолок высоты, что и в bubblesOf: иначе вторая склейка
   // (mergeBubbles) снова собирала абзацы в блок на полстраницы.
   const mergedTop = Math.min(a.top, b.top), mergedBottom = Math.max(a.bottom, b.bottom);
-  if (mergedBottom - mergedTop > 0.22) return false;
+  // Плотные строки одного облачка склеиваем и выше 22 % (см. bubblesOf).
+  const gapAB = b.top - a.bottom;
+  const tightAB = gapAB <= Math.min(aLine, bLine) * 0.9;
+  if (mergedBottom - mergedTop > (tightAB ? 0.42 : 0.22)) return false;
   return true;
 }
 function mergeBubbles(lines, bubbleGap, mergeHeightRatio) {
@@ -3537,7 +3642,8 @@ function mergeBubbles(lines, bubbleGap, mergeHeightRatio) {
       // Средняя высота ОДНОЙ строки внутри облачка — по ней решается, можно ли
       // приклеить следующую. Средняя, а не минимум: минимум занижала любая
       // случайно тонкая строка, и облачко рвалось на части.
-      merged.lh = (merged.bottom - merged.top) / merged.rows;
+      merged.hs = [...(b.hs || [b.lh || (b.bottom - b.top)]), ...(line.hs || [line.lh || (line.bottom - line.top)])];
+      merged.lh = median(merged.hs) || (merged.bottom - merged.top) / merged.rows;
       result[bestIndex] = merged;
     } else {
       // Строка (или блок) попадает в результат с ТОЙ ЖЕ «типичной высотой»,
@@ -3545,7 +3651,8 @@ function mergeBubbles(lines, bubbleGap, mergeHeightRatio) {
       // блок из двух строк уже не принимал третью (отношение высот > 1,8) —
       // облачко рвалось на два текста.
       const rows = Math.max(1, line.rows || 1);
-      result.push({ ...line, rows, lh: (line.bottom - line.top) / rows });
+      const hs = line.hs || [line.lh || (line.bottom - line.top)];
+      result.push({ ...line, rows, hs, lh: median(hs) || (line.bottom - line.top) / rows });
     }
   }
   return result;
@@ -3591,6 +3698,13 @@ function absorbOrphans(bubbles) {
   return alive;
 }
 /* Полосы сверху вниз, внутри полосы — по направлению чтения. */
+/** Медиана чисел — устойчивее среднего, когда одна строка выбивается. */
+function median(nums) {
+  const a = (nums || []).filter(n => Number.isFinite(n) && n > 0).sort((x, y) => x - y);
+  if (!a.length) return 0;
+  return a[a.length >> 1];
+}
+
 function orderBubbles(bubbles, rtl) {
   if (bubbles.length <= 1) return bubbles;
   const heights = bubbles.map(b => b.bottom - b.top).sort((a, b) => a - b);
@@ -3602,8 +3716,17 @@ function orderBubbles(bubbles, rtl) {
     if (bands.length && b.top - bandTop <= tolerance) bands[bands.length - 1].push(b);
     else { bands.push([b]); bandTop = b.top; }
   }
-  // rtl: правые реплики первыми (по убыванию left), ltr: по возрастанию.
-  return bands.flatMap(band => band.sort((x, y) => rtl ? y.left - x.left : x.left - y.left));
+  // rtl: правые реплики первыми (по убыванию left), ltr: по возрастанию —
+  // но ТОЛЬКО между репликами, стоящими на одной высоте. Раньше порядок
+  // задавался одним left, и в разорванном высоком облачке нижняя половина
+  // уезжала ВПЕРЁД верхней: «СКРЫВАЕШЬ ОТ МЕНЯ…» звучало раньше «ТЫ ДУМАЕШЬ
+  // Я НЕ ЗНАЛ» (жалоба 4.11).
+  const overlapY = (a, b) => Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+  return bands.flatMap(band => band.sort((x, y) => {
+    const minH = Math.min(x.bottom - x.top, y.bottom - y.top);
+    if (minH > 0 && overlapY(x, y) >= minH * 0.5) return rtl ? y.left - x.left : x.left - y.left;
+    return x.top - y.top;
+  }));
 }
 /* панели: горизонтальные «желоба» между кадрами (упрощённый KomaPanels) */
 /**
@@ -3676,7 +3799,19 @@ function readingOrder(regions, rtl, onlyCyr, R) {
   // 42 строки), и группировка по рамке давала 42 «реплики» по строке. Поэтому
   // реплики по-прежнему собираются по близости строк, а признак рамки (r.box)
   // остаётся в записи для диагностики.
-  const lines = splitPanels(source, rtl, 0).flatMap(p => bubblesOf(p, rtl, R));
+  const panels = splitPanels(source, rtl, 0);
+  // Диагностика для замеров: какие строки пришли и на какие панели их разрезало.
+  // Нужна, чтобы «почему реплика развалилась» решать по данным, а не на глаз.
+  try {
+    if (typeof window !== 'undefined') {
+      window.KOMA_DIAG = {
+        rows: source.map(r => ({ t: r.text, top: +r.top.toFixed(4), bottom: +r.bottom.toFixed(4),
+                                 left: +r.left.toFixed(4), right: +r.right.toFixed(4) })),
+        panels: panels.map(p => p.length),
+      };
+    }
+  } catch (e) { /* диагностика не должна ломать чтение */ }
+  const lines = panels.flatMap(p => bubblesOf(p, rtl, R));
   // СНАЧАЛА геометрия, ПОТОМ язык: облачко, развалившееся на две реплики, надо
   // собрать до словаря. Иначе словарь судит половинки и выбрасывает ту, где
   // мало знакомых слов («ОНА ВСЁ СЩЕ» пропадала, оставался один «ШЕПЧЕТ» —
@@ -3735,8 +3870,15 @@ function joinSplitBubbles(result) {
         // панели и три соседних облачка становились одной «репликой» на 15
         // слов (живой прогон 29.10, второй заход).
         if (aw > 0.5 || bw > 0.5) continue;                       // не проза
-        if (Math.abs(a.left - b.left) > 0.03) continue;
-        if (Math.abs(a.right - b.right) > 0.03) continue;
+        // Края совпадают — колонка. ИЛИ центры совпадают: в облачке с
+        // ЦЕНТРИРОВАННЫМ текстом строки разной длины, и края половинок
+        // расходятся («ТЫ ДУМАЕШЬ Я НЕ ЗНАЛ…» / «СКРЫВАЕШЬ ОТ МЕНЯ…»:
+        // 0,191…0,704 против 0,225…0,668). Раньше по этому признаку высокая
+        // реплика и оставалась разрезанной пополам.
+        const edgeOk = Math.abs(a.left - b.left) <= 0.03 && Math.abs(a.right - b.right) <= 0.03;
+        const centerOk = Math.abs((a.left + a.right) / 2 - (b.left + b.right) / 2) <= 0.04
+          && Math.max(aw, bw) / Math.max(1e-6, Math.min(aw, bw)) <= 1.35;
+        if (!edgeOk && !centerOk) continue;
         if (Math.max(aw, bw) / Math.min(aw, bw) > 1.5) continue;
         const vgap = Math.max(b.top - a.bottom, a.top - b.bottom);
         const alh = a.lh || (a.bottom - a.top), blh = b.lh || (b.bottom - b.top);
@@ -3745,7 +3887,10 @@ function joinSplitBubbles(result) {
         // оставалась разрезанной). Края и ширина при этом обязаны совпасть,
         // так что соседние облачка под правило не попадают.
         if (vgap > Math.min(alh, blh) * 1.3) continue;
-        if (Math.max(a.bottom, b.bottom) - Math.min(a.top, b.top) > 0.22) continue;
+        // Плотное облачко может быть выше 22 % страницы (шесть-семь строк) —
+        // потолок 0,42 для него, 0,22 остаётся для разреженного текста.
+        const tightPair = vgap <= Math.min(alh, blh) * 0.9;
+        if (Math.max(a.bottom, b.bottom) - Math.min(a.top, b.top) > (tightPair ? 0.42 : 0.22)) continue;
         // Высота «строки» у разваленной половинки считается по её собственным
         // строкам и может отличаться вдвое — для склейки это не приговор.
         if (Math.max(alh, blh) / Math.min(alh, blh) > 2.5) continue;
