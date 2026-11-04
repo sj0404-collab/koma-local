@@ -1012,9 +1012,25 @@ const Buffer = {
       .filter(v => !v.book || v.book === id)
       .sort((a, b) => a.page - b.page);
   },
+  /**
+   * Стереть ВЕСЬ буфер строк, у всех книг (1.9.69).
+   *
+   * Раньше «Буфер строк → Очистить» чистил только открытую книгу, а если книга
+   * не открыта — не делал ничего: keyPrefix() возвращает null и функция молча
+   * выходила. Человек чистил «в двух местах», видел «Буфер очищен», а страницы
+   * одной из книг продолжали приходить из базы. Теперь очистка одна и та же
+   * для всех книг, и она же сбрасывает память страниц.
+   */
+  async clearAll() {
+    const rows = (await DB.all('kv') || []).filter(r => typeof r.k === 'string'
+      && (r.k.startsWith('buf:') || r.k.startsWith('spoken:')));
+    for (const r of rows) await DB.del('kv', r.k);
+    try { Reader.regions.clear(); Reader.bandCache.clear(); } catch (e) { /* не критично */ }
+    return rows.length;
+  },
   async clear() {
     const prefix = this.keyPrefix();
-    if (!prefix) return;
+    if (!prefix) return this.clearAll();
     const rows = (await DB.all('kv') || []).filter(r => typeof r.k === 'string' && r.k.startsWith(prefix));
     for (const r of rows) await DB.del('kv', r.k);
   },

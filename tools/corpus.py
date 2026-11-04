@@ -10,6 +10,7 @@ HTML = sys.argv[1] if len(sys.argv) > 1 else '/home/user/kl/koma-web.html'
 OUT = sys.argv[2] if len(sys.argv) > 2 else '/tmp/corpus.json'
 MODELS = '/home/user/koma-lab/models2/'
 PAGES = sorted(glob.glob('/home/user/mieruko/mieruko-ch01-p*.jpg'))
+if __import__('os').environ.get('LIMIT'): PAGES = PAGES[:int(__import__('os').environ['LIMIT'])]
 
 with sync_playwright() as pw:
     b = pw.chromium.launch(args=['--no-sandbox'])

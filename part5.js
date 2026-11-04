@@ -167,6 +167,8 @@ function bindUI() {
   $('#btnModels').onclick = () => { openSheet('sheetModels'); renderModels(); };
 
   $('#btnRulesLib').onclick = () => { openSheet('sheetRules'); renderRulesInfo(); renderBufferSheet(); };
+  // Полка фильтров библиотеки (Все / Читаю / Не начато) — 1.9.69.
+  if (typeof bindLibChips === 'function') bindLibChips();
   $$('#closeSheets,#closeSheets2,#closeSheets3,#closeSheets4,#closeSheets5').forEach(b => b.onclick = closeSheets);
 
   // Кнопка «Проверить движок» была в разметке, но НИ К ЧЕМУ не привязана:
@@ -439,7 +441,12 @@ function bindUI() {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'koma-buffer.txt'; a.click();
   };
-  $('#btnBufferClear').onclick = async () => { await Buffer.clear(); await renderBufferSheet(); toast('Буфер очищен'); };
+  $('#btnBufferClear').onclick = async () => {
+    // Одна кнопка — одна правда: стираем буфер ВСЕХ книг и память страниц.
+    const n = await Buffer.clearAll();
+    await renderBufferSheet();
+    toast(n ? 'Буфер очищен: убрано записей ' + n : 'Буфер и так был пуст', 3500);
+  };
 
   // читалка
   $('#btnBack').onclick = () => { TTS.stop(); show('library'); Library.load(); };
@@ -793,8 +800,20 @@ async function selfCheck() {
   // не выполнился вообще ни один скрипт).
   const errs = (State.bootErrors || []);
   const tail = errs.length ? ' ⚠ не поднялось — ' + errs.join('; ') : '';
-  $('#selfCheck').textContent = 'KOMA Web ' + VERSION + ' · ' + parts.join(' · ') + tail;
-  $('#selfCheck').dataset.ok = errs.length ? '0' : '1';
+  const full = 'KOMA Web ' + VERSION + ' · ' + parts.join(' · ') + tail;
+  // Полная строка состояния живёт в ⚙ → «Сборка»: на экране библиотеки она
+  // выглядела как отладочный вывод («OCR: моделей нет · onnxruntime-web не
+  // загружен · голосов 0») и мешала обложкам.
+  const fullEl = $('#selfCheckFull');
+  if (fullEl) fullEl.textContent = full;
+  // А на библиотеке — только когда что-то действительно не поднялось.
+  const sc = $('#selfCheck');
+  const bad = errs.length > 0;
+  sc.textContent = bad ? ('Не поднялось: ' + errs.join('; ') + ' — подробности в ⚙ → Сборка') : '';
+  sc.style.display = bad ? 'block' : 'none';
+  sc.dataset.ok = bad ? '0' : '1';
+  sc.style.background = bad ? '#7a303022' : 'transparent';
+  sc.style.color = bad ? '#ffb4b4' : 'var(--dim)';
 }
 
 (async function boot() {
@@ -871,7 +890,14 @@ async function selfCheck() {
   await step('модели: загрузка', async () => {
     if (OCR.ready && OCR.engine === 'native') return;   // считаем нативно
     const ok = await OCR.loadModels().catch(e => { console.warn('модели не загрузились', e); return false; });
-    if (!ok && (await DB.get('kv', 'model:det'))) toast('Модели есть, но движок не загрузился — нужна сеть для onnxruntime-web', 5000);
+    if (!ok) {
+      // В АПК страница собирается БЕЗ onnxruntime-web (build.sh: LITE): считает
+      // нативный движок. Если и он не поднялся — говорим прямо, а не «нужна сеть».
+      const ortOff = (typeof ort === 'undefined');
+      toast(ortOff
+        ? 'Распознавание недоступно: в этой сборке нет встроенного движка, а нативный не поднялся. Откройте ⚙ и посмотрите состояние моделей'
+        : 'Модели есть, но движок не загрузился — нужна сеть для onnxruntime-web', 6000);
+    }
     // Модели НЕ вшиты в файл (так файл в 2,5 раза легче). Их даёт человек через
     // ⚙ → Модели: detection.onnx, cyrillic.onnx, cyrillic.txt.
     if (!(await DB.get('kv', 'model:det'))) {

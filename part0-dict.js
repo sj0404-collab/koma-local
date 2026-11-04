@@ -22,7 +22,14 @@ const DICT_GZ_B64 = 'H4sIADzT4GoC/3y9S5Idx5IlOI9VYAMssb+7Lye7K1MyRarytVS9kpKa4UM
 
 /** Разжать вшитый словарь и отдать текстом (построчно, «слово частота»). */
 async function embeddedDictText() {
-  const bytes = b64ToBytes(DICT_GZ_B64);
+  // b64ToBytes раньше лежала в части с WASM (part0-ort.js). В лёгкой сборке для
+  // АПК этой части нет — без запасной функции словарь молча не разжимался, и
+  // вся языковая починка оставалась выключенной. Проверено: без неё
+  // Words.ready = false навсегда.
+  const b64 = (typeof b64ToBytes === 'function') ? b64ToBytes
+    : (s) => { const bin = atob(s); const out = new Uint8Array(bin.length);
+               for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; };
+  const bytes = b64(DICT_GZ_B64);
   if (typeof DecompressionStream === 'undefined') {
     throw new Error('браузер не умеет DecompressionStream');
   }

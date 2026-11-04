@@ -1936,7 +1936,9 @@ const OCR = {
     }
     if (typeof ort === 'undefined') {
       this.ready = false; this.engine = 'failed';
-      this.reason = 'onnxruntime-web не загрузился: нужна сеть при первом открытии';
+      // В сборке для АПК движка onnxruntime-web нет вообще (build.sh: LITE):
+      // считает нативный ONNX Runtime приложения. В браузере — нужна сеть.
+      this.reason = 'onnxruntime-web в этой сборке нет: считает нативный движок АПК';
       return false;
     }
     this.engine = 'loading'; this.reason = '';

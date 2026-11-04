@@ -15,7 +15,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.68';
+const VERSION = 'v1.9.69';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -325,28 +325,74 @@ function mimeOf(name) {
   return e === 'png' ? 'image/png' : e === 'webp' ? 'image/webp' : e === 'gif' ? 'image/gif' : 'image/jpeg';
 }
 
+/**
+ * Полка библиотеки (1.9.69, по образцу Yomukai).
+ *
+ * Что изменилось по существу, а не только по виду:
+ *  · фильтр «Все / Читаю / Не начато» — раньше с десятком глав нельзя было
+ *    понять, что уже открывали;
+ *  · полоска прогресса на обложке — видно, где остановился;
+ *  · подпись под обложкой, а не поверх: заголовок больше не закрывает рисунок;
+ *  · кнопка удаления не висит поверх каждой обложки (случайные нажатия),
+ *    а появляется после первой попытки и подтверждается вторым нажатием.
+ */
+Library.filter = 'all';
+function libFiltered() {
+  const f = Library.filter || 'all';
+  return Library.books.filter(b => {
+    const prog = Number(b.progress) || 0;
+    if (f === 'reading') return prog > 0;
+    if (f === 'new') return !prog;
+    return true;
+  });
+}
 function renderLibrary() {
   const grid = $('#libGrid');
-  $('#libEmpty').style.display = Library.books.length ? 'none' : 'block';
+  const sub = $('#libSub');
+  const all = Library.books;
+  const list = libFiltered();
+  if (sub) {
+    sub.textContent = all.length
+      ? `${all.length} ${all.length === 1 ? 'глава' : (all.length < 5 ? 'главы' : 'глав')} · локальные файлы, без сети`
+      : 'локальные файлы · ничего не уходит в сеть';
+  }
+  $('#libEmpty').style.display = all.length ? 'none' : 'block';
+  document.querySelectorAll('#libChips .chip').forEach(c => {
+    c.classList.toggle('on', (c.dataset.filter || 'all') === (Library.filter || 'all'));
+  });
   grid.innerHTML = '';
-  for (const b of Library.books) {
+  if (all.length && !list.length) {
+    grid.innerHTML = '<div class="empty" style="grid-column:1/-1">Под этот фильтр глав нет.<br>'
+      + 'Нажмите «Все».</div>';
+    return;
+  }
+  for (const b of list) {
     const el = document.createElement('div');
     el.className = 'card';
     el.dataset.armed = '0';
     const url = b.cover ? URL.createObjectURL(b.cover) : '';
-    el.innerHTML = `${url ? `<img src="${url}" alt="">` : '<div class="nofoto">нет обложки</div>'}
+    const count = Number(b.count) || 0;
+    const prog = Math.max(0, Math.min(count, Number(b.progress) || 0));
+    const pct = count > 1 ? Math.round(prog / (count - 1) * 100) : (prog ? 100 : 0);
+    const where = prog > 0 ? `стр. ${prog + 1} из ${count}` : 'не начато';
+    el.innerHTML = `${url ? `<img src="${url}" alt="">` : '<div class="nofoto">НЕТ ОБЛОЖКИ</div>'}
       <button class="del">✕</button>
-      <div class="cap">${escapeHtml(b.title)}<span>${b.count} стр. · ${b.mode === 'vertical' ? 'лента' : b.mode === 'rtl' ? 'справа налево' : 'слева направо'}</span></div>`;
+      <div class="cap">${escapeHtml(b.title)}<span>${where} · ${b.mode === 'vertical' ? 'лента' : b.mode === 'rtl' ? 'справа налево' : 'слева направо'}</span></div>
+      <div class="bar"><i style="width:${pct}%"></i></div>`;
     // confirm() в предпросмотре и части мобильных браузеров глушится, поэтому
     // спрашиваем вторым нажатием, а не модалкой.
     el.querySelector('.del').onclick = async (e) => {
       e.stopPropagation();
       if (el.dataset.armed !== '1') {
         el.dataset.armed = '1';
+        el.classList.add('armed');
         el.querySelector('.del').textContent = '?';
         toast('Нажмите ✕ ещё раз, чтобы удалить «' + b.title + '»');
         setTimeout(() => {
-          if (el.dataset.armed === '1') { el.dataset.armed = '0'; el.querySelector('.del').textContent = '✕'; }
+          if (el.dataset.armed === '1') {
+            el.dataset.armed = '0'; el.classList.remove('armed');
+            el.querySelector('.del').textContent = '✕';
+          }
         }, 3000);
         return;
       }
@@ -356,6 +402,11 @@ function renderLibrary() {
     el.onclick = () => openBook(b);
     grid.appendChild(el);
   }
+}
+function bindLibChips() {
+  document.querySelectorAll('#libChips .chip').forEach(c => {
+    c.onclick = () => { Library.filter = c.dataset.filter || 'all'; renderLibrary(); };
+  });
 }
 /**
  * Открыть книгу. Раньше карточка звала openBook(), а такой функции не было

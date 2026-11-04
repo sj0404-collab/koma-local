@@ -5,9 +5,14 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>KOMA Web · локальная библиотека и читалка</title>
 <style>
+  /* Палитра 1.9.69: по образцу библиотеки Yomukai — почти чёрный фон, панели
+     на два тона светлее, индиго как единственный акцент и тонкие линии вместо
+     рамок. Раньше фон был зеленоватым (#171a17), а «акцент» — сиреневым, из-за
+     чего интерфейс выглядел собранным из разных наборов. */
   :root{
-    --bg:#171a17; --panel:#232822; --panel2:#2e342c; --text:#f2f4ef; --dim:#b2b8ad;
-    --orange:#ff8a4c; --line:#39412f; --red:#e57373; --accent:#b9a7ff;
+    --bg:#0d0f13; --panel:#161a20; --panel2:#232a33; --text:#f3f5f8; --dim:#939daa;
+    --orange:#ff8a4c; --line:#242a32; --red:#ef6b6b; --accent:#7c6cf0;
+    --ok:#4ec98a;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
@@ -143,18 +148,91 @@
   /* В АПК панель чтения нативная (под страницей). Своя HTML-панель в это
      время скрыта: две панели на экране — это и было «дёргается». */
   body.native-ui #playBar { display: none !important; }
+
+  /* ═══ Редизайн 1.9.69 — по образцу библиотеки Yomukai ═══════════════════
+     Что взято оттуда: тёмный «чернильный» фон, обложки крупными карточками с
+     подписью ПОД обложкой (а не поверх), полоска прогресса чтения, полка
+     фильтров под шапкой, круглые кнопки-иконки в шапке и плавающая нижняя
+     пилюля в читалке. Ничего в разметке ID не менялось — только вид. */
+  header{background:#0f1217e8;backdrop-filter:blur(10px);border-bottom:1px solid #ffffff0f;
+    padding:calc(env(safe-area-inset-top) + 10px) 14px 10px}
+  header .title b{font-size:20px;font-weight:650;letter-spacing:-.2px}
+  header .title span{font-size:11px;color:var(--dim);margin-top:2px}
+  .icon{width:40px;height:40px;border-radius:50%;background:var(--panel2);font-size:16px;color:#e8ecf2}
+  .icon:active{background:#303945}
+  .libchips{display:flex;gap:8px;padding:10px 14px 2px;overflow:auto;background:transparent}
+  .libchips .chip{flex:0 0 auto;background:#171c23;color:var(--dim);border:1px solid #ffffff0d;
+    border-radius:20px;padding:7px 14px;font-size:12.5px}
+  .libchips .chip.on{background:var(--accent);color:#fff;border-color:transparent;font-weight:600}
+  .pad{padding:12px 14px 26px}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:18px 14px}
+  .card{background:transparent;border-radius:0;overflow:visible;position:relative}
+  .card img,.card .nofoto{border-radius:14px;aspect-ratio:2/3;box-shadow:0 10px 22px #000000a8;
+    background:linear-gradient(160deg,#1b2028,#12151a)}
+  .card .nofoto{font-size:10.5px;color:#5b6675;letter-spacing:.4px}
+  .card .cap{padding:8px 2px 0;font-size:12.5px;line-height:1.3;font-weight:550;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .card .cap span{display:block;color:var(--dim);font-size:10.5px;margin-top:3px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:400}
+  .card .bar{height:3px;border-radius:2px;background:#ffffff12;margin-top:7px;overflow:hidden}
+  .card .bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
+  .card .del{top:6px;right:6px;width:26px;height:26px;background:#0b0d11cc;backdrop-filter:blur(4px);
+    font-size:12px;color:#cfd6df;opacity:0;transition:opacity .15s}
+  .card.armed .del{opacity:1;background:#ef6b6b;color:#fff}
+  /* на телефоне «✕» показывается долгим нажатием/первым нажатием, но прятать
+     её совсем нельзя: тогда книгу не удалить */
+  @media (hover:hover){ .card:hover .del{opacity:1} }
+  .empty{padding:46px 24px;font-size:13.5px;line-height:1.6;color:var(--dim)}
+  .empty b{color:var(--text)}
+
+  /* Читалка: плавающие панели, как в Yomukai — страница занимает весь экран */
+  #readerHeader{background:#0f1217d9 !important;backdrop-filter:blur(12px);
+    border-bottom:1px solid #ffffff0f;padding:calc(env(safe-area-inset-top) + 8px) 12px 8px}
+  .bottombar{left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));
+    background:#0f1217e0;border:1px solid #ffffff12;border-radius:24px;backdrop-filter:blur(14px);
+    padding:7px 9px;gap:8px;box-shadow:0 12px 30px #000000a8}
+  .bottombar .pillbtn{flex:1;min-width:0;height:40px;border-radius:20px;background:var(--panel2);
+    font-size:13px;font-weight:550;color:#e8ecf2;display:flex;align-items:center;justify-content:center;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .bottombar .roundbtn{width:40px;height:40px;border-radius:50%;background:var(--accent);color:#fff;
+    display:grid;place-items:center;font-size:15px}
+  .bottombar .roundbtn.dim{background:var(--panel2);color:#e8ecf2}
+  .bottombar .pgcounter{display:flex;align-items:baseline;gap:3px;font-size:11.5px;color:var(--dim);
+    padding:0 6px 0 2px;min-width:52px;justify-content:flex-end}
+  .bottombar .pgcounter b{font-size:14px;color:var(--text);font-weight:650}
+  .floatbar{bottom:calc(72px + env(safe-area-inset-bottom));background:#0f1217e6;
+    border:1px solid #ffffff12;backdrop-filter:blur(12px)}
+  .startCard{background:#12161ce8;border:1px solid #ffffff12;border-radius:18px;
+    bottom:calc(78px + env(safe-area-inset-bottom));box-shadow:0 16px 40px #000000b0}
+  .startCard .t{font-size:16px}
+  .startCard .acts .btn{background:var(--panel2);border-radius:20px;height:44px;font-size:13.5px;
+    font-weight:550;justify-content:center}
+  .startCard .acts .btn.primary{background:var(--accent);color:#fff}
+  #startCard .acts .btn#btnStartRead{background:var(--accent);color:#fff}
+  #startCard .acts .btn#btnStartClose{background:transparent;border:1px solid #ffffff1a;
+    flex:0 0 48px;min-width:48px}
+  .bottombar .roundbtn.dim,#btnFrames{background:var(--panel2);color:#e8ecf2}
+  .bottombar .roundbtn#btnRead{background:var(--accent)}
+  .sheet{background:#12161c;border:1px solid #ffffff0f;border-bottom:0}
+  .sheet .head{font-size:20px;font-weight:650;letter-spacing:-.2px;padding-bottom:2px}
+  .toast{background:#0b0e13f2;border:1px solid #ffffff12;border-radius:14px}
 </style>
 </head>
 <body>
 
 <!-- ═══ Библиотека ═══ -->
 <section id="library" class="screen on">
-  <header>
-    <div class="title"><b>Локальная библиотека</b><span id="libSub">папки, CBZ и отдельные страницы</span></div>
+  <header class="libhead">
+    <div class="title"><b>Библиотека</b><span id="libSub">локальные файлы · ничего не уходит в сеть</span></div>
     <button class="icon" id="btnImport" title="Добавить">＋</button>
-    <button class="icon" id="btnModels" title="Модели OCR">⚙</button>
-    <button class="icon" id="btnRulesLib" title="Правила">☰</button>
+    <button class="icon" id="btnModels" title="Движок и модели">⚙</button>
+    <button class="icon" id="btnRulesLib" title="Правила чтения">☰</button>
   </header>
+  <div class="libchips" id="libChips">
+    <button class="chip on" data-filter="all">Все</button>
+    <button class="chip" data-filter="reading">Читаю</button>
+    <button class="chip" data-filter="new">Не начато</button>
+  </div>
   <div class="scroll pad">
     <div id="envBanner" style="display:none;background:#7a3030;color:#fff;border-radius:12px;padding:10px 12px;font-size:12px;margin-bottom:12px"></div>
     <div id="selfCheck" class="hint" style="margin-bottom:10px">Скрипты страницы не выполнились — поэтому кнопки не реагируют. Откройте файл в Chrome (или разрешите inline-скрипты на этом сервере).</div>
@@ -209,13 +287,10 @@
   <div class="nextArrow down" id="nextArrow" style="display:none">▼ Прокрутить</div>
 
   <div class="bottombar" id="readerBar">
-    <button class="btn" id="btnOcr2">✨ Текст страницы</button>
-    <span class="grow"></span>
-    <button class="icon" id="btnRead" title="Читать">▶</button>
-    <button class="icon" id="btnFrames" title="Рамки">⛶</button>
-    <span style="font-size:11.5px;color:var(--dim);min-width:44px;text-align:right" id="pageNum">1</span>
-    <span style="font-size:11px;color:var(--dim)">/</span>
-    <span style="font-size:11.5px;color:var(--dim);min-width:24px" id="pageTotal">1</span>
+    <button class="pillbtn" id="btnOcr2">Текст страницы</button>
+    <button class="roundbtn" id="btnRead" title="Читать">▶</button>
+    <button class="roundbtn" id="btnFrames" title="Рамки">⛶</button>
+    <span class="pgcounter"><b id="pageNum">1</b><span>/</span><span id="pageTotal">1</span></span>
   </div>
 </section>
 
@@ -247,6 +322,8 @@
       <b>detection.onnx</b>, <b>cyrillic.onnx</b>, <b>cyrillic.txt</b>.</div>
     <div class="lbl">СОСТОЯНИЕ</div>
     <div id="modelsState" class="kv"></div>
+    <div class="lbl">СБОРКА</div>
+    <div id="selfCheckFull" class="hint" style="line-height:1.5"></div>
     <div class="hint" style="margin-top:8px">
       Можно выбрать <b>все три файла сразу</b>, можно по одному — шторка не закроется,
       и ниже будет видно, чего ещё не хватает.

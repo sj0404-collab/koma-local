@@ -8,7 +8,14 @@
 set -e
 cd -- "$(dirname -- "$0")"
 
-PARTS="part1.html part0-ort.js part0-wasm.js part0-dict.js part2.js part3.js part4a-edge.js part4.js part5.js"
+# Две сборки из одних и тех же частей:
+#   koma-web.html  — полная: страница + движок WASM (для браузера и стенда);
+#   koma-lite.html — без onnxruntime-web (7,8 МБ): её кладём в АПК, потому что
+#                    на телефоне всё равно считает нативный ONNX Runtime.
+# Просьба 4.11: «библиотеку полностью нативно, без wasm, раз разницы нет».
+PARTS_FULL="part1.html part0-ort.js part0-wasm.js part0-dict.js part2.js part3.js part4a-edge.js part4.js part5.js"
+PARTS_LITE="part1.html part0-dict.js part2.js part3.js part4a-edge.js part4.js part5.js"
+PARTS="$PARTS_FULL"
 for f in $PARTS; do
   [ -f "$f" ] || { echo "НЕТ части $f"; exit 1; }
 done
@@ -33,4 +40,9 @@ PY
 )
 if [ -n "$miss" ]; then echo "кнопки без обработчика: $miss"; exit 1; fi
 echo "проверки: ок"
-cp koma-web.html apk/app/src/main/assets/koma-web.html
+# ── Сборка для АПК: без WASM ────────────────────────────────────────────────
+cat $PARTS_LITE > koma-lite.html
+LZ=$(stat -c%s koma-lite.html)
+echo "лёгкая сборка (без WASM): $LZ Б"
+if ! grep -q "VERSION = 'v" koma-lite.html; then echo "ЛЁГКАЯ СБОРКА БИТАЯ"; exit 1; fi
+cp koma-lite.html apk/app/src/main/assets/koma-web.html
