@@ -30,18 +30,32 @@ jobs:
       - name: Собрать читалку из частей
         run: bash build.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Проверить, что онлайн-путей нет
+      - name: Проверить, что сетевых адресов не стало больше
         run: |
           set -e
-          # Разрешения на интернет быть не должно: тогда «онлайн» физически нет.
-          if grep -q "android.permission.INTERNET" apk/app/src/main/AndroidManifest.xml; then
-            echo "В манифесте остался INTERNET"; exit 1
-          fi
-          # Ни Lens, ни загрузчика обновлений в исходниках быть не должно.
+          # Правило: онлайн в сборке РОВНО столько, сколько названо вслух.
+          #   speech.platform.bing.com — голоса Edge (по просьбе человека, 04.11);
+          #   lens.google.com         — старый движок Lens, по умолчанию ВЫКЛЮЧЕН
+          #                             (переключатель «Движок»); остаётся как есть;
+          #   www.w3.org              — пространство имён SSML, это не запрос.
+          # Любой НОВЫЙ адрес роняет сборку — чтобы «онлайн» не разрастался молча.
+          HOSTS=$(grep -rhoE "https?://[a-zA-Z0-9._-]+|wss?://[a-zA-Z0-9._-]+" \
+                    part1.html part2.js part3.js part4.js part4a-edge.js part5.js \
+                    apk/app/src/main/java \
+                  | sed -E 's#^[a-z]+://##' | sort -u || true)
+          echo "$HOSTS" | tee -a "$GITHUB_STEP_SUMMARY"
+          EXTRA=$(echo "$HOSTS" | grep -vE "^(speech\.platform\.bing\.com|lens\.google\.com|www\.w3\.org|appassets\.androidplatform\.net|schemas\.android\.com)$" || true)
+          if [ -n "$EXTRA" ]; then echo "новые сетевые адреса: $EXTRA"; exit 1; fi
           if grep -rlE "GlensEngine|KomaLensBridge|class Updater" apk/app/src/main/java; then
-            echo "в исходниках остался онлайн-код"; exit 1
+            echo "в исходниках остался посторонний онлайн-код"; exit 1
           fi
-          echo "онлайн-путей нет: ни INTERNET, ни Lens, ни обновления из сети" | tee -a "$GITHUB_STEP_SUMMARY"
+          if ! grep -q "android.permission.INTERNET" apk/app/src/main/AndroidManifest.xml; then
+            echo "нет INTERNET — онлайн-голос не заработает"; exit 1
+          fi
+          if ! grep -q "Edg/" apk/app/src/main/java/net/koma/reader/MainActivity.kt; then
+            echo "в UA нет токена Edg/ — сервис голосов ответит 403"; exit 1
+          fi
+          echo "сетевых адресов не больше названного: голоса Edge + старый Lens (выключен)" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - uses: gradle/actions/setup-gradle@v3
         with:
