@@ -78,6 +78,15 @@ jobs:
           for f in assets/models/det.onnx assets/models/rec.onnx assets/models/charset.txt assets/koma-web.html; do
             unzip -l koma-local.apk | grep -q "$f" || { echo "НЕТ $f"; exit 1; }
           done
+          # 1.0.20: страница в АПК — ЛЁГКАЯ (без движка WASM). Проверяем это в
+          # самом APK, а не в репозитории: однажды gradle уже перекрыл лёгкую
+          # сборку полной, и в APK уехали лишние 7,8 МБ.
+          unzip -p koma-local.apk assets/koma-web.html > /tmp/page.html
+          PAGE=$(stat -c%s /tmp/page.html)
+          echo "страница в APK: $PAGE Б" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$PAGE" -lt 6000000 || { echo "в APK попала полная страница ($PAGE Б)"; exit 1; }
+          if grep -q "ORT_WASM_GZ" /tmp/page.html; then echo "в странице остался движок WASM"; exit 1; fi
+          grep -q "const WORDS\|рыбак\|абвгдежзий" /tmp/page.html || { echo "в странице нет словаря"; exit 1; }
           SZ=$(stat -c%s koma-local.apk)
           echo "размер APK: $SZ Б" | tee -a "$GITHUB_STEP_SUMMARY"
           test "$SZ" -lt 52428800 || { echo "APK больше 50 МБ"; exit 1; }

@@ -19,7 +19,11 @@ android {
         // Версию читалки знает только сам html. Читаем её при сборке и зашиваем
         // в BuildConfig — чтобы при старте не перечитывать 11 МБ ради сравнения
         // с тегом релиза на GitHub.
-        val pageHtml = rootProject.file("../koma-web.html")
+        // В АПК кладётся ЛЁГКАЯ сборка (без onnxruntime-web, build.sh: LITE);
+        // полная остаётся для браузера. Если лёгкой нет — берём полную.
+        val pageHtml = listOf(rootProject.file("../koma-lite.html"),
+                              rootProject.file("../koma-web.html"))
+            .firstOrNull { it.exists() } ?: rootProject.file("../koma-web.html")
         val pageVer = if (pageHtml.exists())
             Regex("VERSION = '(v[0-9.]+)'").find(pageHtml.readText())?.groupValues?.get(1) ?: "unknown"
         else "unknown"
@@ -91,8 +95,12 @@ dependencies {
  * сборка не падает: остаётся та копия, что уже лежит в assets.
  */
 val copyWeb by tasks.registering(Copy::class) {
-    val src = rootProject.file("../koma-web.html")
-    if (src.exists()) {
+    // 1.0.20: в APK идёт лёгкая сборка — в ней нет 7,8 МБ движка WASM, считает
+    // нативный ONNX Runtime (assets/models). Раньше здесь брался koma-web.html,
+    // и он молча перекрывал лёгкую версию, подготовленную build.sh.
+    val src = listOf(rootProject.file("../koma-lite.html"),
+                     rootProject.file("../koma-web.html")).firstOrNull { it.exists() }
+    if (src != null) {
         from(src)
         into(layout.projectDirectory.dir("src/main/assets"))
         rename { "koma-web.html" }
