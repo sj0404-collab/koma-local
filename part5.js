@@ -927,9 +927,12 @@ async function selfCheck() {
   parts.push(typeof ort === 'undefined' ? 'onnxruntime-web не загружен (нужна сеть)' : 'onnxruntime-web загружен');
   // Голос есть/нет — по фасаду, без прямого speechSynthesis: в WebView его нет.
   const vc = (typeof VOICE !== 'undefined') ? VOICE.voices().length : 0;
-  parts.push('голос: ' + (VOICE && VOICE.available()
-    ? (VOICE.kind() + ', голосов ' + vc)
-    : 'нет синтеза'));
+  // Для онлайн-голоса список голосов Android ни при чём: «голосов 0» рядом с
+  // «Edge TTS (онлайн)» читалось как противоречие (скриншот 04.11).
+  const voiceLine = (typeof VOICE !== 'undefined' && VOICE.edge && VOICE.edge())
+    ? VOICE.kind() + ', ' + EDGE.label() + (EDGE.uaOk() ? '' : ', UA без Edg/')
+    : VOICE.kind() + ', голосов ' + vc;
+  parts.push('голос: ' + (VOICE && VOICE.available() ? voiceLine : 'нет синтеза'));
   if (ENV.android) parts.push('Android: папки нет, выбирайте файлы/CBZ');
   // Строка состояния — единственное место, где видно правду о загрузке.
   // Если что-то не поднялось, пишем это здесь, а не оставляем на экране
