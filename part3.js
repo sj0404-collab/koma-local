@@ -716,6 +716,80 @@ function spliceFragmentRuns(text) {
   return out.join(' ');
 }
 
+/**
+ * Вернуть отрезанный хвост слова по сырым строкам этой же страницы (1.9.66).
+ *
+ * Откуда задача. Телефон 4.11 (v1.9.64) прочитал реплику «…В НАШУ ШКОЛ?», хотя
+ * в блоке «как распознано» на той же странице стоит полное «…В НАШУ ШКОЛУ?».
+ * Значит движок отдал ДВА варианта одной строки — обрезанный и целый, — а в
+ * реплику попал обрезанный. Проверил и страницу (JS), и движок чтения (Kotlin,
+ * apk/tools/readtest): на моих данных буква не теряется, значит теряется она
+ * при сборке кропов на телефоне, и виноватого без логов не назвать.
+ *
+ * Поэтому чиним не «где теряется», а «что делать, если потерялось»: если
+ * последнее слово реплики — начало более длинного слова, которое в этой же
+ * странице прочитано ЦЕЛИКОМ, берём целое. Только последнее слово и только
+ * наращение в 1–3 буквы: «ШКОЛ» → «ШКОЛУ», «ПОДУМАЛ» → «ПОДУМАЛА».
+ */
+function restoreCutTails(text, rawTexts) {
+  const src = String(text || '');
+  if (!src || !rawTexts || !rawTexts.length) return src;
+  const tokens = src.split(' ');
+  const last = tokens[tokens.length - 1] || '';
+  const m = /^([А-Яа-яЁё]{4,})([^\p{L}\p{N}]*)$/u.exec(last);
+  if (!m) return src;
+  const stem = m[1], tail = m[2] || '';
+  const low = stem.toLowerCase();
+  const words = new Set();
+  for (const raw of rawTexts) {
+    for (const w of String(raw || '').match(/[А-Яа-яЁё]{4,}/g) || []) words.add(w);
+  }
+  let best = null;
+  for (const w of words) {
+    const lw = w.toLowerCase();
+    if (lw.length <= low.length || lw.length - low.length > 3) continue;
+    if (!lw.startsWith(low)) continue;
+    if (!best || w.length > best.length) best = w;
+  }
+  if (!best) return src;
+  const fixed = stem === stem.toUpperCase() ? best.toUpperCase()
+    : (stem[0] === stem[0].toUpperCase() ? best[0].toUpperCase() + best.slice(1).toLowerCase()
+      : best.toLowerCase());
+  tokens[tokens.length - 1] = fixed + tail;
+  return tokens.join(' ');
+}
+
+/**
+ * Выбросить двухбуквенный огрызок, приклеившийся к слову (1.9.66).
+ *
+ * «СЛАВАвb» (телефон 4.11) после снятия латиницы распадалось на «СЛАВ» + «АВ»,
+ * и реплика звучала «СЛАВ АВ БОГУ!». Правило узкое: огрызок из двух букв, не
+ * частое слово, и его буквы уже есть в конце или начале соседнего слова —
+ * значит это не слово, а хвост, который движок прочитал дважды.
+ */
+function dropStuckFragments(text) {
+  if (typeof Words === 'undefined' || !Words.ready || !Words.rank) return text;
+  const tokens = String(text || '').split(' ').filter(Boolean);
+  if (tokens.length < 2) return text;
+  const common = (w) => {
+    const r = Words.rank.get(String(w).toLowerCase());
+    return r !== undefined && r <= Words.KNOWN_RANK;
+  };
+  const out = [];
+  for (const t of tokens) {
+    const core = (t.match(/[А-Яа-яЁё]+/g) || []).join('');
+    const prev = out.length ? out[out.length - 1] : '';
+    const prevCore = (prev.match(/[А-Яа-яЁё]+/g) || []).join('');
+    const c = core.toUpperCase();
+    if (c.length === 2 && !common(c) && prevCore.length >= 4
+        && (prevCore.toUpperCase().endsWith(c) || prevCore.toUpperCase().startsWith(c))) {
+      continue;                                   // это хвост предыдущего слова
+    }
+    out.push(t);
+  }
+  return out.join(' ');
+}
+
 function polishLineText(raw) {
   let text = String(raw || '').replace(/\u00AD/g, '-').replace(/\s+/g, ' ').trim();
   if (!text) return '';
@@ -740,6 +814,8 @@ function polishLineText(raw) {
   text = glueSplitWords(text);
   text = fixConfusedShortWords(text);
   text = repairWordsByDict(text);
+  text = dropStuckFragments(text);
+
   text = fixCaseInCaps(text);
   return trimJunkEdges(text).trim();
 }

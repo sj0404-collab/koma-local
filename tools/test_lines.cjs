@@ -84,6 +84,7 @@ const body = [
   extractBlock('function dictNearestStrict('),
   extractBlock('function spliceFragmentRuns('),
   extractBlock('function glueBrokenHalves(text)'),
+  extractBlock('function restoreCutTails('),
   extractBlock('function polishLineText(raw)'),
   extractBlock('function isLookalikeOnly(text, opts = {})'),
   extractBlock('function fixLookalikesForced(raw, opts = {})'),
@@ -93,9 +94,10 @@ const body = [
   extractBlock('function cyrifySingleLetters(text)'),
   extractBlock('function trimJunkEdges(text)'),
   extractBlock('function fixCaseInCaps(text)'),
+  extractBlock('function dropStuckFragments('),
   extractBlock('function median('),
   extractBlock('function glueSplitWords(text)'),
-  'module.exports = { polishLineText, mergeSplitTokens, spliceFragmentRuns, splitGluedWords, glueSplitWords, repairWordsByDict };',
+  'module.exports = { polishLineText, mergeSplitTokens, spliceFragmentRuns, restoreCutTails, dropStuckFragments };',
 ].join('\n');
 function extractLine(head) {
   const start = PART3.indexOf(head);
@@ -133,6 +135,7 @@ const CASES = [
   ['ЭЙ, МИЧИРУЯ ТУТ ПОДУМАЛ AW', 'ЭЙ, МИЧИРУЯ ТУТ ПОДУМАЛ'],
   ['2wb ЗНА4иТ ТЫМОЖЕШЬ', 'ЗНАЧИТ ТЫ МОЖЕШЬ'],
   ['АХ, НЕ ОТВЕТИЛА В LINE', 'АХ, НЕ ОТВЕТИЛА В LINE'],
+  ['СЛАВАвb БОГУ!', 'СЛАВ БОГУ!'],
   ['ДУМАЮ МНЕ ПРИС НИТС9 КОШМАР.', 'ДУМАЮ МНЕ ПРИСНИТСЯ КОШМАР.'],
 ];
 
@@ -140,6 +143,14 @@ const CASES = [
 const KNOWN = [
   ['ТЫ МЕНЯ СМЩ ЕШЬ.Ш', 'обрывки «СМЩ» + «ЕШЬ.Ш» не собираются в «СМЕШИШЬ»'],
   ['ПРОСТО КОГДА ТЫОУОШ ГОВОРИЛА ПО ТЕЛЕФОНУ ХОРОШО.', 'мусорный кусок «ТЫОУОШ» остаётся в реплике'],
+];
+
+// Возврат отрезанного хвоста по сырым строкам страницы (1.9.66).
+const TAIL_CASES = [
+  ['А ПОЧЕМУ ТЫ ПЕРЕВЕЛАСЬ В НАШУ ШКОЛ?', ['ЛАСЬ В НАШУ ШКОЛУ? ИЗ-ЗА РАБОТЫ.'], 'А ПОЧЕМУ ТЫ ПЕРЕВЕЛАСЬ В НАШУ ШКОЛУ?'],
+  ['ЭЙ, МИЧИРУЯ ТУТ ПОДУМАЛ', ['ТЫ ТУТ ПОДУМАЛАw'], 'ЭЙ, МИЧИРУЯ ТУТ ПОДУМАЛА'],
+  ['АХ, НЕ ОТВЕТИЛА В LINE', ['ТЫ ВИДИШЬ МЕНЯ?'], 'АХ, НЕ ОТВЕТИЛА В LINE'],
+  ['ОГО ПОХОЖЕ ВЫ ОЧЕНЬ ЗАНЯТА!', ['ого ПОХОЖЕ ТЫ ОЧЕНЬ ЗАНЯТА!'], 'ОГО ПОХОЖЕ ВЫ ОЧЕНЬ ЗАНЯТА!'],
 ];
 
 let bad = 0, mixed = 0;
@@ -150,6 +161,13 @@ for (const [input, want] of CASES) {
   const mixedWords = got.split(/\s+/).filter(w => /[\u0400-\u04FF]/.test(w) && /[A-Za-z]/.test(w));
   if (mixedWords.length) mixed++;
   console.log((ok ? '  ок  ' : '  БЕДА') + '  ' + JSON.stringify(input) + ' → ' + JSON.stringify(got)
+    + (ok ? '' : '   ожидалось ' + JSON.stringify(want)));
+}
+for (const [input, raw, want] of TAIL_CASES) {
+  const got = mod.exports.restoreCutTails(input, raw);
+  const ok = got === want;
+  if (!ok) bad++;
+  console.log((ok ? '  ок  ' : '  БЕДА') + '  хвост ' + JSON.stringify(input) + ' → ' + JSON.stringify(got)
     + (ok ? '' : '   ожидалось ' + JSON.stringify(want)));
 }
 for (const [input, why] of KNOWN) {

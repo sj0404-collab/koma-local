@@ -544,8 +544,12 @@ const Reader = {
         // Ни одна прочитанная строка не должна остаться за бортом реплики:
         // именно из-за этого реплики выходили обрезками («НО РАЗВЕ»).
         const rec = recoverLostLines(fresh, res.regions);
+        // Сырые строки этой же страницы — улика против обрезков: если движок
+        // где-то прочитал слово целиком, хвост реплики восстанавливаем по нему.
+        const rawTexts = (res.regions || []).map(r => String((r && r.text) || ''));
         fresh = rec.replicas
-          .map(r => ({ ...r, text: Words.polish(polishLineText(String(r.text || '')), RULES.junkRatio, r.confidence) }))
+          .map(r => ({ ...r, text: restoreCutTails(polishLineText(String(r.text || '')), rawTexts) }))
+          .map(r => ({ ...r, text: Words.polish(r.text, RULES.junkRatio, r.confidence) }))
           .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
         OCR.recovered = rec.attached;
         OCR.readPlan = 'native';
