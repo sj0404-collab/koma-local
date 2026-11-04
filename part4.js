@@ -2732,7 +2732,19 @@ function mergeBandLines(parts, canvas) {
       const k = keyOf(ln.text);
       const h = Math.max(1e-6, ln.bottom - ln.top);
       // Тот же текст в том же месте — дубль от перекрытия полос.
-      if (k && out.some(o => keyOf(o.text) === k && overlapV(o, ln) > h * 0.2)) continue;
+      //
+      // «В том же месте» — это И по вертикали, И по горизонтали. Раньше здесь
+      // хватало вертикали, и два одинаковых облачка на одной высоте («ТЫ
+      // ВИДИШЬ МЕНЯ?» слева и справа, страница Mieruko-chan) считались одним:
+      // одна реплика молча пропадала (5 из 6 вместо 6 из 6, замер 04.11).
+      const overlapHdup = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left);
+      if (k && out.some(o => {
+        if (keyOf(o.text) !== k) return false;
+        if (overlapV(o, ln) <= h * 0.2) return false;
+        const ow = Math.max(1e-6, o.right - o.left);
+        const w = Math.max(1e-6, ln.right - ln.left);
+        return overlapHdup(o, ln) > Math.min(ow, w) * 0.4;
+      })) continue;
       // Разный текст на одном месте: оставляем тот, что осмысленнее. Ничего не
       // выбрасываем «по диапазону полосы» — так терялись реплики, которые
       // соседняя полоса просто не распознала.

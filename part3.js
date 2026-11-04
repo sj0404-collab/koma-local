@@ -184,6 +184,70 @@ function fixLookalikes(raw) {
   }).join(' ');
 }
 
+/**
+ * Путаница Ы ↔ В в коротких словах.
+ *
+ * На печатных шрифтах манги распознаватель читает «ТЫ» как «ТВ»: буква Ы
+ * рисуется близко к В, и модель ошибается (замер 04.11 на Mieruko-chan:
+ * «ТВ ВИДИШЬ МЕНЯ?» — 4 реплики подряд). «ТВ» есть в словаре (телевизор),
+ * поэтому словарная починка молчит.
+ *
+ * Правило узкое: слово из 2–3 букв, и замена РОВНО ОДНОЙ буквы Ы↔В даёт
+ * частое короткое слово (ты, вы, мы…). Ничего длиннее не трогаем, никакие
+ * другие пары букв не трогаем — иначе поедет смысл.
+ */
+const SHORT_COMMON = ['ТЫ', 'ВЫ', 'МЫ', 'ОН', 'ОНА', 'ОНИ', 'НЕ', 'НО', 'ДА',
+  'ЖЕ', 'ЛИ', 'ИХ', 'ЕЁ', 'ЕГО', 'Я', 'ТО', 'ТАК', 'ВОТ', 'УЖ', 'ВСЁ', 'ВСЕ'];
+function fixConfusedShortWords(text) {
+  const raw = String(text || '');
+  if (!raw) return raw;
+  return raw.split(' ').map(w => {
+    const core = w.replace(/[^\p{L}\p{N}]/gu, '');
+    if (core.length < 2 || core.length > 3) return w;
+    const up = core.toUpperCase();
+    if (SHORT_COMMON.includes(up)) return w;
+    // Путаница в коротком слове идёт не только В↔Ы: «Ы» белым по чёрному
+    // модель читает как «6»/«b», а те переводятся в «Б»/«В» («T6» → «Тб»,
+    // «Tb» → «Тв»). Поэтому пробуем весь набор похожих начертаний, а не одну
+    // пару: «ТБ» → «ТЫ», «ТВ» → «ТЫ» (замер 04.11, Mieruko-chan, стр.4).
+    const TWINS = { 'В': ['Ы'], 'Ы': ['В'], 'Б': ['Ы'], 'Ь': ['Ы', 'В'] };
+    for (let i = 0; i < up.length; i++) {
+      const ch = up[i];
+      const alts = TWINS[ch];
+      if (!alts) continue;
+      let cand = null;
+      for (const alt of alts) {
+        const tryIt = up.slice(0, i) + alt + up.slice(i + 1);
+        if (SHORT_COMMON.includes(tryIt)) { cand = tryIt; break; }
+      }
+      if (!cand) continue;
+      const fixedCore = (core === core.toUpperCase())
+        ? cand
+        : cand.charAt(0) + cand.slice(1).toLowerCase();
+      return w.replace(core, fixedCore);
+    }
+    return w;
+  }).join(' ');
+}
+
+/**
+ * Одиночная латинская буква внутри русской реплики — это почти всегда
+ * двойник: «АХ, НЕ ОТВЕТИЛА B LINE» → «В LINE» (замер 04.11, Mieruko-chan,
+ * стр.4). Полный fixLookalikesForced здесь нельзя: он перевёл бы и «LINE»
+ * целиком в «LІNЕ». Правило узкое — токен ровно из одной латинской буквы,
+ * у которой есть кириллический двойник.
+ */
+const SINGLE_TWINS = { A: 'А', B: 'В', C: 'С', E: 'Е', H: 'Н', K: 'К', M: 'М',
+  O: 'О', P: 'Р', T: 'Т', X: 'Х', Y: 'У' };
+function cyrifySingleLetters(text) {
+  return String(text || '').split(/(\s+)/).map(tok => {
+    const m = /^([^\p{L}]?)([A-Za-z])([^\p{L}]?)$/u.exec(tok);
+    if (!m || !m[2]) return tok;
+    const twin = SINGLE_TWINS[m[2].toUpperCase()];
+    return twin ? m[1] + twin + m[3] : tok;
+  }).join('');
+}
+
 /** Строка состоит ТОЛЬКО из символов-двойников: «OHO», «4YBC», «MHE TAK». */
 function isLookalikeOnly(text) {
   const letters = Array.from(text).filter(ch => /[\p{L}\p{N}]/u.test(ch));
@@ -2374,6 +2438,8 @@ async function decodeAllVariants(crop, R, first) {
   tries.push(['contrast', contrastCanvas(crop)]);
   tries.push(['pad20up2', upscaleCanvas(pointed, 2)]);
   tries.push(['bin0', binarizeCanvas(crop, 0, R)]);
+  // Инверсия: белый текст на чёрном облачке (крик «ТЫ!») без неё не читается.
+  tries.push(['bin1', binarizeCanvas(crop, 1, R)]);
   // «Умно»: не больше maxVariants подготовок на строку. Замер 27.10 на 45
   // строках: побеждал «orig» в 43 случаях, «pad20» и «up2» делили остаток —
   // дальше (contrast, pad20up2, bin0) выигрывали редко, а стоили столько же.
@@ -2432,11 +2498,37 @@ async function decodeBetter(cropCanvas, R, opts = {}) {
   }
   const need = Math.max(0, Math.round(R.decodeRetryBelow ?? 1));
   let out = first;
+  const rankT = (t) => {
+    const st = lineStat(t);
+    return st.known * 10 - st.junk * 12 + Math.min(letters(t), 10) * 0.5;
+  };
+  // Крошечная строка без единой кириллической буквы — это, как правило, белый
+  // текст на ЧЁРНОМ облачке-крике. Исходный кроп «ТЫ!» даёт «T6» (2 знака),
+  // дальше фильтр кириллицы выбрасывает её целиком, и реплика исчезает со
+  // страницы (замер 04.11, Mieruko-chan, стр.4: 6 из 7 облачков). Пробуем обе
+  // полярности бинаризации и негатив, выбираем по словарю — на обычном тексте
+  // правило не срабатывает (там кириллица есть с первого прочтения).
+  if (R.decodeVariants !== false && letters(first[0]) <= 2
+      && !/[\p{Script=Cyrillic}]/u.test(first[0])) {
+    for (const cv of [binarizeCanvas(cropCanvas, 1, R), invertCanvas(cropCanvas),
+                      binarizeCanvas(cropCanvas, 0, R)]) {
+      if (!cv) continue;
+      await yieldUI();
+      let att;
+      try { att = await decodeCrop(cv); } catch (e) { continue; }
+      if (rankT(att[0]) > rankT(out[0])) out = att;
+    }
+    if (rankT(out[0]) > rankT(first[0])) DECODE_STATS.variantsPicked++;
+  }
   if (!(need === 0 || letters(first[0]) >= need)) {
-    let best = first;
+    // Выбор между полярностями — ПО СЛОВАРЮ, а не по числу букв: на чёрном
+    // облачке-крике «ТЫ!» (белым по чёрному) исходный кроп даёт «T6» (2 знака),
+    // и прежнее правило «больше букв» оставляло латиницу, которую потом
+    // выбрасывал фильтр кириллицы — реплика исчезала со страницы (замер 04.11).
+    let best = out;                 // уже улучшенное чтение (см. негатив выше)
     for (const pol of [0, 1]) {
       const att = await decodeCrop(binarizeCanvas(cropCanvas, pol, R));
-      if (letters(att[0]) > letters(best[0])) best = att;
+      if (rankT(att[0]) > rankT(best[0])) best = att;
     }
     out = best;
   }
@@ -3777,6 +3869,20 @@ function readingOrder(regions, rtl, onlyCyr, R) {
   // Порядок как в KomaAutoRead: сначала нормализация и починка двойников,
   // ПОТОМ фильтр языка. Иначе фрагмент с латинскими буквами («He6лuцa»)
   // отбрасывался целиком, и слово пропадало из озвучки.
+  // Латинские обрывки внутри русского облачка («В LINE» в «АХ, НЕ ОТВЕТИЛА
+  // В LINE»). Раньше фильтр «в репликах кириллица» выбрасывал такую строку
+  // целиком, и реплика теряла хвост (замер 04.11, Mieruko-chan, CER 0,318).
+  // Держим их отдельно и приклеиваем к готовой реплике в самом конце — после
+  // словарной чистки, иначе латиница снова улетает как мусор. Геометрию
+  // облачков при этом НЕ трогаем: иначе менялась разбивка на панели.
+  const foreign = [];
+  for (const r of regions) {
+    const t = String(r.text || '').trim();
+    if (!t || /[\p{Script=Cyrillic}]/u.test(t)) continue;
+    if ((t.match(/[\p{L}]/gu) || []).length < 3) continue;
+    if (/\d/.test(t) || /^(tr|tl|hd|page|vol)\b/i.test(t)) continue;
+    foreign.push(r);
+  }
   let source = regions
     .map(r => {
       let text = String(r.text || '').replace(/\u00AD/g, '-').replace(/\s+/g, ' ').trim();
@@ -3784,6 +3890,8 @@ function readingOrder(regions, rtl, onlyCyr, R) {
       const fixed = fixLookalikes(text);
       if (onlyCyr && !isCyr(fixed) && isLookalikeOnly(fixed)) text = fixLookalikesForced(fixed);
       else text = fixed;
+      // Ы ↔ В в коротких словах («ТВ ВИДИШЬ» → «ТЫ ВИДИШЬ»).
+      text = fixConfusedShortWords(text);
       // Правки из JSON-плагинов: то, что модель исказила системно («ГОВОРЯ.ш»),
       // человек исправляет файлом, а не новой сборкой.
       if (typeof Plugins !== 'undefined' && Plugins.list && Plugins.list.length) {
@@ -3791,8 +3899,8 @@ function readingOrder(regions, rtl, onlyCyr, R) {
       }
       return { ...r, text };
     })
-    .filter(r => /[\p{L}\p{N}]/u.test(r.text))
-    .filter(r => !onlyCyr || isCyr(r.text));
+    .filter(r => /[\p{L}\p{N}]/u.test(r.text));
+  source = source.filter(r => !onlyCyr || isCyr(r.text));
   if (!source.length) return [];
   // Рамки детектора для группировки НЕ годятся: на этой странице детектор
   // обводит КАЖДУЮ строку отдельной рамкой (проверено дампом 29.10: 42 рамки на
@@ -3831,7 +3939,38 @@ function readingOrder(regions, rtl, onlyCyr, R) {
   // Регистр — здесь же: сборка реплик идёт мимо cleanSpeech, поэтому «ОНА Вс
   // ШЕПЧЕТ» доходило до экрана как есть (прогон 29.10).
   for (const l of result) l.text = fixCaseInCaps(trimTailFragments(stripJunkWords(l.text)));
-  const kept = result.filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
+  let kept = result.filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
+  // Приклеиваем инородные обрывки к реплике, из облачка которой они пришли.
+  for (const f of foreign) {
+    const fh = Math.max(1e-6, f.bottom - f.top);
+    const host = kept
+      .filter(l => {
+        const gap = f.top - l.bottom;
+        if (gap > Math.max(fh * 1.2, 0.016) || gap < -Math.max(fh * 0.6, 0.01)) return false;
+        const lw = Math.max(1e-6, l.right - l.left);
+        const fw = Math.max(1e-6, f.right - f.left);
+        return Math.min(l.right, f.right) - Math.max(l.left, f.left) > Math.min(lw, fw) * 0.3;
+      })
+      .sort((a, b) => Math.abs(f.top - a.bottom) - Math.abs(f.top - b.bottom))[0];
+    if (!host) continue;
+    const add = cyrifySingleLetters(fixConfusedShortWords(fixLookalikes(String(f.text || '').trim())));
+    if (!add) continue;
+    // Куда именно вставить. Хвост в конце строки — это конец облачка («…В LINE»),
+    // но обрывок бывает и В СЕРЕДИНЕ: на стр.6 Mieruko-chan строка СТРАШНЫХ
+    // прочлась латиницей и приклеивалась в конец — «МНОГО ВЕЩЕЙ.. СТРАШНЫХ»
+    // вместо «МНОГО СТРАШНЫХ ВЕЩЕЙ..». Поэтому, если ниже обрывка в том же
+    // облачке есть строка-якорь, вставляем ПЕРЕД ней.
+    const anchor = source
+      .filter(r => r.text && r !== f && r.top >= f.bottom - 0.004
+                && r.top < host.bottom && r.left < host.right && r.right > host.left)
+      .sort((a, b) => a.top - b.top)[0];
+    const at = anchor ? host.text.indexOf(String(anchor.text).trim()) : -1;
+    if (at > 0) {
+      host.text = (host.text.slice(0, at) + add + ' ' + host.text.slice(at)).replace(/\s+/g, ' ').trim();
+    } else {
+      host.text = (host.text.replace(/\s+$/, '') + ' ' + add).replace(/\s+/g, ' ').trim();
+    }
+  }
   result.length = 0;
   result.push(...kept);
   markLargeText(result, source);
@@ -4054,10 +4193,24 @@ function rescueLostLines(result, source, R) {
     if (best < 0 || bestD > 0.18) continue;
     const l = result[best];
     if (alreadyInside(key, l.text)) continue;
+    // Куда в реплике встаёт потерянная строка. Сравнение с ЦЕНТРОМ реплики
+    // ошибается на многострочных облачках: в «СЕГОДНЯ / БЫЛО / МНОГО /
+    // СТРАШНЫХ / ВЕЩЕЙ..» строка СТРАШНЫХ выше центра, и словарь-починка
+    // уносила её в конец — «МНОГО ВЕЩЕЙ.. СТРАШНЫХ» (замер 04.11, стр.6).
+    // Поэтому ищем строку-якорь НИЖЕ обрывка в том же облачке и вставляем
+    // перед ней; прежнее поведение остаётся запасным вариантом.
+    const anchor = source
+      .filter(o => o !== r && o.text && o.top >= r.bottom - 0.004
+                && o.top < l.bottom && o.left < l.right && o.right > l.left)
+      .sort((a, b) => a.top - b.top)[0];
+    const at = anchor ? l.text.indexOf(String(anchor.text).trim()) : -1;
     const above = rc < (l.top + l.bottom) / 2;
+    const merged = at >= 0
+      ? (l.text.slice(0, at) + t + ' ' + l.text.slice(at)).replace(/\s+/g, ' ').trim()
+      : (above ? (t + ' ' + l.text) : (l.text + ' ' + t));
     result[best] = {
       ...l,
-      text: above ? (t + ' ' + l.text) : (l.text + ' ' + t),
+      text: merged,
       left: Math.min(l.left, r.left), top: Math.min(l.top, r.top),
       right: Math.max(l.right, r.right), bottom: Math.max(l.bottom, r.bottom),
       rescued: true,
