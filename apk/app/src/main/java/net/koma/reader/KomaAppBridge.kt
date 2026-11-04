@@ -8,9 +8,9 @@ import org.json.JSONObject
  * Мост приложения в ЛОКАЛЬНОЙ сборке: только сведения и перезагрузка.
  *
  * Здесь нет ни проверки обновлений, ни Lens: сборка не имеет разрешения на
- * интернет вообще. Страница спрашивает `checkUpdate` и `lensSelfTest` только
- * тогда, когда эти кнопки видны; отвечаем честно «в этой сборке недоступно»,
- * чтобы ни одна кнопка не молчала.
+ * интернет вообще, кроме голосов Edge (их включает сам человек в настройках).
+ * Страница спрашивает `checkUpdate` только тогда, когда кнопка видна; отвечаем
+ * честно «в этой сборке недоступно», чтобы ни одна кнопка не молчала.
  */
 class KomaAppBridge(
     private val appVersion: String,
@@ -33,12 +33,6 @@ class KomaAppBridge(
             .toString()
         post(cbId, "done", done)
     }
-
-    @JavascriptInterface
-    fun lensSelfTest(): String = JSONObject()
-        .put("ok", false)
-        .put("note", "Lens в локальной сборке отключён намеренно")
-        .toString()
 
     @JavascriptInterface
     fun reloadNow(reason: String) = reload(reason.ifBlank { "перезагрузка" })

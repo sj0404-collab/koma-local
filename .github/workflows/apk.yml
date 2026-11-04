@@ -35,8 +35,6 @@ jobs:
           set -e
           # Правило: онлайн в сборке РОВНО столько, сколько названо вслух.
           #   speech.platform.bing.com — голоса Edge (по просьбе человека, 04.11);
-          #   lens.google.com         — старый движок Lens, по умолчанию ВЫКЛЮЧЕН
-          #                             (переключатель «Движок»); остаётся как есть;
           #   www.w3.org              — пространство имён SSML, это не запрос.
           # Любой НОВЫЙ адрес роняет сборку — чтобы «онлайн» не разрастался молча.
           HOSTS=$(grep -rhoE "https?://[a-zA-Z0-9._-]+|wss?://[a-zA-Z0-9._-]+" \
@@ -44,10 +42,15 @@ jobs:
                     apk/app/src/main/java \
                   | sed -E 's#^[a-z]+://##' | sort -u || true)
           echo "$HOSTS" | tee -a "$GITHUB_STEP_SUMMARY"
-          EXTRA=$(echo "$HOSTS" | grep -vE "^(speech\.platform\.bing\.com|lens\.google\.com|www\.w3\.org|appassets\.androidplatform\.net|schemas\.android\.com)$" || true)
+          EXTRA=$(echo "$HOSTS" | grep -vE "^(speech\.platform\.bing\.com|www\.w3\.org|appassets\.androidplatform\.net|schemas\.android\.com)$" || true)
           if [ -n "$EXTRA" ]; then echo "новые сетевые адреса: $EXTRA"; exit 1; fi
           if grep -rlE "GlensEngine|KomaLensBridge|class Updater" apk/app/src/main/java; then
             echo "в исходниках остался посторонний онлайн-код"; exit 1
+          fi
+          # Lens убран из читалки целиком (просьба 04.11): он не распознавал
+          # страницу сам, а требовал открыть сайт и перенести текст руками.
+          if grep -rn "lens.google.com\|LENS\.\|KomaLens" part1.html part2.js part3.js part4.js part5.js; then
+            echo "движок Lens вернулся в читалку — так нельзя"; exit 1
           fi
           if ! grep -q "android.permission.INTERNET" apk/app/src/main/AndroidManifest.xml; then
             echo "нет INTERNET — онлайн-голос не заработает"; exit 1
@@ -55,7 +58,7 @@ jobs:
           if ! grep -q "Edg/" apk/app/src/main/java/net/koma/reader/MainActivity.kt; then
             echo "в UA нет токена Edg/ — сервис голосов ответит 403"; exit 1
           fi
-          echo "сетевых адресов не больше названного: голоса Edge + старый Lens (выключен)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "сетевых адресов ровно столько, сколько названо: только голоса Edge" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - uses: gradle/actions/setup-gradle@v3
         with:

@@ -199,17 +199,6 @@ const Reader = {
       const isCur = this.isCurrentLine(i, line);
       const isDone = this.isSpoken(i, line);
       if (line.large) d.classList.add('large');     // титул/каллиграфия — другой цвет
-      // Текст из Lens: координат нет, полосы равные — честно помечаем пунктиром
-      // и номером, чтобы «рамка» не выглядела точным местом на картинке.
-      if (line.fromLens || data.fromLens) {
-        // 'det' — рамка стоит на облачке, найденном локальным детектором;
-        // 'band' — координат нет вовсе, полосы равные (пунктир + номер).
-        d.classList.add('approx');
-        const n = document.createElement('span');
-        n.className = 'fnum';
-        n.textContent = String(idx + 1);
-        d.appendChild(n);
-      }
       if (isCur) d.classList.add('cur');
       else if (isDone) d.classList.add('done');
       d.onclick = () => TTS.speakLine(line);
@@ -466,47 +455,6 @@ const Reader = {
    */
   async scanPage(i, opts = {}) {
     this.hideStart();
-    // Режим «Google Lens»: локальный конвейер НЕ запускаем вообще. Иначе
-    // получалось бы «нажал Распознать — и ничего не произошло, только звёздочка
-    // покрутилась»: Lens работает в другой вкладке, а местный OCR тут ни при чём.
-    if (LENS.isLens() && !opts.fromLens && !opts.silent) {
-      const cv = this.canvases[i];
-      if (!cv) { toast('Страница ' + (i + 1) + ' ещё не загрузилась'); return null; }
-      const band = opts.full ? null : this.visibleBandPx(i);
-      const crop = band ? cropCanvas(cv, 0, band.y0, cv.width, Math.max(1, band.y1 - band.y0)) : cv;
-      // СНАЧАЛА прямой путь — как в АПК: сами отправили, сами забрали текст,
-      // никаких сайтов и новых вкладок. Вкладка — только если прямого пути нет
-      // и человек сам нажмёт «Открыть в Lens».
-      if (LENS.hasDirect()) {
-        const badge = $('#scanBadge');
-        if (badge) { badge.classList.add('on'); badge.textContent = 'Lens: распознаю без сайта…'; }
-        let got;
-        try { got = await LENS.recognizeDirect(crop, { page: i }); }
-        finally { if (badge) badge.classList.remove('on'); }
-        if (got.ok) {
-          const res = await applyLensText(i, got.lines.join('\n'), { fromDirect: true });
-          toast('Lens напрямую — ' + (got.via === 'native' ? 'движок АПК' : 'свой релей') + '): '
-                + got.lines.length + ' реплик за ' + got.ms + ' мс', 6000);
-          return this.regions.get(i) || (res && res.ok ? this.regions.get(i) : null);
-        }
-        // Прямой путь не получился — говорим причину и НЕ открываем сайт молча.
-        openSheet('sheetLens');
-        LENS.pendingPage = i;
-        renderLensSheet(i);
-        toast('Прямое распознавание не вышло: ' + got.reason, 9000);
-        return this.regions.get(i) || null;
-      }
-      const sent = LENS.send(crop, { page: i });
-      if (sent.ok) {
-        toast('Страница ' + (i + 1) + ' ушла в Google Lens — откройте новую вкладку', 6000);
-        openSheet('sheetLens');
-        LENS.pendingPage = i;
-        renderLensSheet(i);
-      } else {
-        toast('Lens не открылся: ' + sent.reason, 7000);
-      }
-      return this.regions.get(i) || null;
-    }
     const silent = !!opts.silent;          // предзагрузка: без бейджа и тостов
     const force = !!opts.force;
     const keepSheet = !!opts.keepSheet;
@@ -2264,103 +2212,7 @@ async function cleanLines(lines) {
   return out;
 }
 
-/**
- * Текст, вставленный из Google Lens, становится обычными репликами страницы.
- * Геометрия приблизительная (Lens не отдаёт нам координаты), поэтому в шторке
- * это честно написано: рамки — по номерам сверху вниз, а не по пикселям.
- */
-async function applyLensText(pageIndex, text, opts = {}) {
-  const lines = LENS.textToLines(text);
-  if (!lines.length) return { ok: false, reason: 'в тексте нет ни одной строки с буквами' };
 
-  // ── Где на картинке эти строки ────────────────────────────────────────────
-  // Lens координат не отдаёт. Раньше строки раскладывались равными полосами на
-  // всю ширину — и первая рамка накрывала шапку страницы, что выглядело как
-  // «какая-то синяя рамка ни о чём». Теперь, если локальный детектор доступен
-  // (он у нас есть и работает ~0,4 с), рамки ставятся по найденным облачкам
-  // в том же порядке, в каком идёт текст. Равные полосы остаются запасным
-  // вариантом: без моделей или когда детектор ничего не нашёл.
-  let placed = 'band';
-  const cv = Reader.canvases[pageIndex];
-  if (cv && OCR.ready && opts.detect !== false) {
-    try {
-      const det = await detectWithRetry(cv, RULES);
-      const rtl = (Reader.dir || 'rtl') === 'rtl';
-      const boxes = (det.boxes || [])
-        .filter(b => (b.right - b.left) > cv.width * 0.03 && (b.bottom - b.top) > cv.height * 0.006)
-        .sort((a, b) => (a.top - b.top) || (rtl ? b.left - a.left : a.left - b.left));
-      // Рамки ставим, если детектор нашёл хотя бы два облачка. Соответствие
-      // «реплика ↔ облачко» при этом ПРИБЛИЗИТЕЛЬНОЕ (Lens может склеить или
-      // разбить иначе), поэтому рамка всегда рисуется пунктиром с номером и не
-      // притворяется точным адресом реплики.
-      const fit = boxes.length >= 2;
-      if (fit) {
-        lines.forEach((line, i) => {
-          const b = boxes[Math.min(boxes.length - 1, Math.floor(i * boxes.length / lines.length))];
-          line.left = +(b.left / cv.width).toFixed(4);
-          line.right = +(b.right / cv.width).toFixed(4);
-          line.top = +(b.top / cv.height).toFixed(4);
-          line.bottom = +(b.bottom / cv.height).toFixed(4);
-          line.lensPlaced = 'det';        // место найдено детектором, текст — из Lens
-        });
-        placed = 'det';
-      }
-    } catch (e) { console.warn('Lens: детектор не сработал, ставлю полосы', e); }
-  }
-  if (placed !== 'det') for (const line of lines) line.lensPlaced = 'band';
-
-  // Собираем запись С НУЛЯ, не подмешивая то, что осталось от локального OCR:
-  // иначе в ней жили бы старые regions/ms, и «Распознать заново» или смена
-  // направления чтения дёргали бы данные, которых больше нет.
-  const at = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  Reader.regions.set(pageIndex, {
-    lines, regions: null, cached: true, fromLens: true, lensPlaced: placed,
-    ms: 0, detMs: 0, recMs: 0, crops: 0, boxes: 0, bands: 0, at,
-  });
-  // Полоса-кэш сбрасываем: иначе следующее распознавание вернёт старые строки.
-  if (Reader.bandCache instanceof Map) Reader.bandCache.delete(pageIndex);
-  // Прочитанное от прошлого текста к новому не относится.
-  try { Reader.spoken.clear(); } catch (e) { /* не критично */ }
-  Reader.current = null;
-  Reader.paintPage(pageIndex);
-  if ($('#sheetText').classList.contains('on')) renderTextSheet(pageIndex);
-  return { ok: true, lines: lines.length, placed };
-}
-
-/** Шторка Lens: состояние + какая страница ждёт текст. */
-function renderLensSheet(pageIndex) {
-  const i = pageIndex ?? LENS.pendingPage ?? Reader.textPage ?? Reader.page;
-  LENS.pendingPage = i;
-  const st = $('#lensState');
-  if (st) {
-    const own = Reader.regions.get(i);
-    const tr = LENS.transports();
-    const howDirect = tr.includes('native') ? 'движок АПК (без сайта)'
-      : tr.includes('relay') ? 'через свой релей (без сайта)' : '';
-    st.innerHTML = `Движок: <b>${LENS.isLens() ? 'Google Lens' : 'в файле (офлайн)'}</b>`
-      + ` · страница ${i + 1}`
-      + (howDirect ? ` · прямой путь: <b style="color:#8fd18f">${howDirect}</b>` : ' · прямой путь не настроен')
-      + (own && own.fromLens ? ` · в странице уже ${own.lines.length} реплик из Lens` : '')
-      + (LENS.lastSentAt ? ' · отправлено ' + new Date(LENS.lastSentAt).toLocaleTimeString('ru-RU') : '')
-      + (LENS.lastDirect ? ` · прямой ответ ${LENS.lastDirect.ms} мс` : '');
-  }
-  // Почему прямой путь доступен или нет — прямо в шторке, до нажатия кнопок.
-  const why = $('#lensDirectWhy');
-  if (why) {
-    const tr = LENS.transports();
-    why.innerHTML = tr.length
-      ? 'Прямой путь: <b style="color:#8fd18f">'
-        + (tr.includes('native') ? 'движок АПК (KomaLens)' : 'свой релей')
-        + '</b> — сайт не открывается, текст вернётся сюда сам.'
-      : 'Прямой путь не настроен: в браузере Google не отдаёт ответ чужой странице, '
-        + 'а в АПК подключится встроенный движок. Пока работает сайт и вставка текста.';
-  }
-  const box = $('#lensBox');
-  if (box && !box.value) {
-    const own = Reader.regions.get(i);
-    if (own && own.fromLens) box.value = own.lines.map(l => l.text).join('\n');
-  }
-}
 
 /**
  * Страховка от обрезанных реплик: ни одна прочитанная строка не должна пропасть.
@@ -2434,10 +2286,7 @@ async function renderTextSheet(i) {
   Reader.textPage = i;
   const raw = data.regions || [];
   const stamp = data.at ? ' · обновлено ' + data.at : '';
-  $('#textStats').textContent = (data.fromLens
-    ? `${data.lines.length} реплик · текст из Google Lens · `
-      + (data.lensPlaced === 'det' ? 'рамки по облачкам (найдены локально, порядок из Lens)' : 'рамки примерные — полосы')
-    : data.cached
+  $('#textStats').textContent = (data.cached
     ? `${data.lines.length} реплик · из буфера (без повторного распознавания)`
     : `${raw.length} строк · ${Number.isFinite(data.boxes) ? data.boxes : raw.length} блоков · ${data.crops || 0} кропов · `
       // Нативный проход неделим (детектор и распознавание — один вызов), поэтому

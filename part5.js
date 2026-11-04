@@ -332,18 +332,6 @@ function bindUI() {
     // Страховка: мост мог умереть молча — тогда через 3 минуты скажем прямо.
     setTimeout(() => finish(JSON.stringify({ updated: false, reason: 'мост обновления не ответил' })), 180000);
   };
-  if ($('#btnAppLens')) $('#btnAppLens').onclick = () => {
-    if (!appReady()) { toast('Движок АПК есть только в приложении', 7000); return; }
-    // sync-вызов: нативный движок отвечает сетевым запросом, но здесь это одна
-    // явная проверка по нажатию, и человек ждёт именно её результата.
-    toast('Проверяю нативный Lens…', 4000);
-    try {
-      const r = JSON.parse(window.KomaApp.lensSelfTest() || '{}');
-      toast(r.ok
-        ? 'Lens отвечает: ' + r.lines.length + ' строк(и) за ' + r.ms + ' мс'
-        : 'Lens не ответил: ' + (r.error || (r.antiBot ? 'антибот Google' : 'нет текста')), 9000);
-    } catch (e) { toast('Проверка Lens не удалась: ' + ((e && e.message) || e), 6000); }
-  };
   if (appReady()) {
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       // Оболочка сообщает версию событием после загрузки страницы.
@@ -461,120 +449,9 @@ function bindUI() {
     openSheet('sheetText');
     renderTextSheet(null);           // страницу берём С ЭКРАНА, а не из сохранённого индекса
   };
-  // ── Google Lens как отдельный движок ──────────────────────────────────────
-  // Переключатель живёт в ⚙ → Модели. По умолчанию «в файле»: пока человек сам
-  // не выбрал Lens, картинка страницы никуда не уходит.
-  // По обработчику на кнопку, а не один на контейнер: так «кнопка без
-  // обработчика» не проскочит проверку сборки, и обработчик точно на месте.
-  const setEngine = async (mode) => {
-    await LENS.setMode(mode);
-    syncEngineUI();
-    toast(LENS.isLens()
-      ? 'Движок: Google Lens. «Распознать» отправит страницу в Google новой вкладкой'
-      : 'Движок: в файле. Картинки никуда не отправляются', 6000);
-  };
-  $('#engineLocal').onclick = () => setEngine('local');
-  $('#engineLens').onclick = () => setEngine('lens');
-  // То же переключение, но из шторки «Голос и чтение» — там человек настраивает
-  // чтение и не должен искать движок в другом месте.
-  $('#engineLocal2').onclick = () => setEngine('local');
-  $('#engineLens2').onclick = () => setEngine('lens');
-  const lensSend = (pageIndex) => {
-    const i = pageIndex ?? (Reader.textPage ?? Reader.page);
-    const cv = Reader.canvases[i];
-    if (!cv) { toast('Страница ' + (i + 1) + ' ещё не загрузилась', 4000); return; }
-    const band = Reader.visibleBandPx(i);
-    const crop = band ? cropCanvas(cv, 0, band.y0, cv.width, Math.max(1, band.y1 - band.y0)) : cv;
-    const sent = LENS.send(crop, { page: i, force: true });   // кнопка = явное согласие
-    if (!sent.ok) { toast('Lens не открылся: ' + sent.reason, 6000); return; }
-    LENS.pendingPage = i;
-    renderLensSheet(i);
-    toast('Открываю Google Lens — страница ' + (i + 1) + ' ушла в новую вкладку', 6000);
-  };
-  // Прямое распознавание: без сайта и без новой вкладки (как в АПК).
-  const lensDirect = async (speak) => {
-    const i = LENS.pendingPage ?? Reader.textPage ?? Reader.page;
-    const cv = Reader.canvases[i];
-    if (!cv) { toast('Страница ' + (i + 1) + ' ещё не загрузилась', 4000); return; }
-    if (!LENS.hasDirect()) {
-      // Не делаем вид, что распознали: говорим, чего не хватает, и куда идти.
-      toast('Прямой путь недоступен: нет моста KomaLens из АПК и не задан свой релей', 9000);
-      renderLensSheet(i);
-      return;
-    }
-    const band = Reader.visibleBandPx(i);
-    const crop = band ? cropCanvas(cv, 0, band.y0, cv.width, Math.max(1, band.y1 - band.y0)) : cv;
-    toast('Отправляю кадр в Lens напрямую…', 4000);
-    const got = await LENS.recognizeDirect(crop, { page: i });
-    if (!got.ok) { toast('Прямое распознавание не вышло: ' + got.reason, 10000); renderLensSheet(i); return; }
-    const res = await applyLensText(i, got.lines.join('\n'), { fromDirect: true });
-    if (!res || !res.ok) { toast('Текст пришёл, но строк не нашлось', 6000); return; }
-    toast('Lens напрямую (' + (got.via === 'native' ? 'движок АПК' : 'свой релей') + '): '
-          + res.lines + ' реплик за ' + got.ms + ' мс', 6000);
-    renderLensSheet(i);
-    if (speak) Reader.readPage?.(i);
-  };
-  $('#btnLensDirect').onclick = () => lensDirect(false);
-  $('#btnLensOpen').onclick = () => lensSend(LENS.pendingPage);
-
-  // Свой релей: адрес сохраняется в правила, чтобы не вводить заново.
-  const relayBox = $('#lensRelayUrl');
-  if (relayBox) {
-    relayBox.value = RULES.lensRelay || '';
-    relayBox.onchange = async () => {
-      RULES.lensRelay = String(relayBox.value || '').trim();
-      await saveRules();
-      syncSettingsUI();
-      toast(RULES.lensRelay
-        ? 'Релей сохранён — Lens будет распознавать напрямую, без сайта'
-        : 'Релей убран — прямой путь отключён', 5000);
-    };
-  }
-  // Из читалки в один тап: 🔍 в шапке открывает шторку Lens, а кнопки в
-  // настройках сразу отправляют текущую страницу / открывают вставку.
-  const openLensSheet = () => {
-    openSheet('sheetLens');
-    renderLensSheet(Reader.textPage ?? Reader.page);
-  };
-  $('#btnLensHdr').onclick = openLensSheet;
-  $('#btnLensSend2').onclick = () => lensSend(Reader.textPage ?? Reader.page);
-  $('#btnLensPaste2').onclick = openLensSheet;
-  $('#btnLensSend').onclick = () => lensSend(Reader.textPage ?? Reader.page);
-  $('#btnLensPaste').onclick = () => {
-    openSheet('sheetLens');
-    renderLensSheet(Reader.textPage ?? Reader.page);
-  };
-  // Буфер обмена: только по кнопке (жест), и если браузер запретил — говорим
-  // прямо, а не делаем вид, что вставили.
-  $('#btnLensClip').onclick = async () => {
-    try {
-      if (!navigator.clipboard || !navigator.clipboard.readText) throw new Error('браузер не даёт читать буфер');
-      const text = await navigator.clipboard.readText();
-      if (!text || !text.trim()) { toast('В буфере нет текста — скопируйте текст со страницы Lens', 6000); return; }
-      $('#lensBox').value = text;
-      toast('Скопировано из буфера: ' + text.trim().split(/\r?\n/).length + ' строк', 4000);
-    } catch (e) {
-      toast('Буфер недоступен (' + (e.message || e) + '). Вставьте текст в поле вручную — долгое нажатие → «Вставить»', 9000);
-      const box = $('#lensBox'); if (box) box.focus();
-    }
-  };
-  const lensApply = async (speak) => {
-    const i = LENS.pendingPage ?? Reader.textPage ?? Reader.page;
-    const btn = $('#btnLensApply');
-    if (btn) { btn.disabled = true; btn.textContent = 'Ставлю рамки…'; }
-    let res;
-    try { res = await applyLensText(i, $('#lensBox').value); }
-    finally {
-      if (btn) { btn.disabled = false; btn.textContent = 'В текст страницы'; }
-    }
-    if (!res.ok) { toast('Нечего применять: ' + res.reason, 6000); return; }
-    toast('Текст из Lens принят: ' + res.lines + ' реплик на странице ' + (i + 1)
-      + (res.placed === 'det' ? ' · рамки по облачкам' : ' · рамки примерные (полосы)'), 6000);
-    renderLensSheet(i);
-    if (speak) { TTS.prime(); closeSheets(); TTS.readVisible(); }
-  };
-  $('#btnLensApply').onclick = () => lensApply(false);
-  $('#btnLensRead').onclick = () => lensApply(true);
+  // Движок распознавания ОДИН — локальные модели в фоне (как в Yomikai).
+  // Google Lens убран целиком по просьбе 4.11: он не читал страницу сам,
+  // а требовал открыть сайт и перенести текст руками.
   syncEngineUI();
   $('#btnScan').onclick = openTextSheet;
   $('#btnOcr2').onclick = openTextSheet;
@@ -797,63 +674,29 @@ function bindUI() {
     }
   });
 }
-/** Показать, какой движок выбран. Вызывается и при старте (после LENS.load),
- * и при каждом переключении — иначе кнопка «В файле» выглядела бы выбранной
- * всегда, даже когда человек уже переключился на Lens. */
+/**
+ * Строка про движок в настройках. Движок теперь ОДИН (локальные модели в
+ * фоне), поэтому здесь только честный текст, без переключателей: раньше
+ * кнопка «В файле» выглядела выбранной всегда, даже когда был включён Lens.
+ */
 function syncEngineUI() {
-  for (const id of ['engineLocal', 'engineLens', 'engineLocal2', 'engineLens2']) {
-    const b = $('#' + id); if (!b) continue;
-    const on = (b.dataset.engine === 'lens') === LENS.isLens();
-    // Два класса — не описка: в ⚙ → «Модели» это кнопки (.btn.hot), а в
-    // «Голос и чтение» — чипсы (.chip.on). На скриншоте 28.10 было видно, что
-    // выбранный движок никак не подсвечен, потому что код ставил только .hot.
-    b.classList.toggle('hot', on);
-    b.classList.toggle('on', on);
-    // setAttribute — только если он есть: в тестовом мини-DOM его нет, и
-    // раньше это роняло два набора тестов насмерть (FATAL вместо FAIL).
-    if (typeof b.setAttribute === 'function') b.setAttribute('aria-pressed', on ? 'true' : 'false');
-  }
-  const note = $('#engineLensNote');
-  if (note) note.style.opacity = LENS.isLens() ? '1' : '0.65';
   const hdr = $('#btnLensHdr');
-  if (hdr) {
-    hdr.classList.toggle('hot', LENS.isLens());
-    hdr.title = LENS.isLens() ? 'Google Lens включён' : 'Google Lens';
-  }
-  const relay = $('#lensRelayState');
-  if (relay) {
-    const kl = (typeof window !== 'undefined') ? window.KomaLens : null;
-    const native = !!(kl && (typeof kl.recognizeAsync === 'function' || typeof kl.recognize === 'function'));
-    const tr = (typeof LENS !== 'undefined' && LENS.transports) ? LENS.transports() : [];
-    relay.innerHTML = native
-      ? 'Прямой путь: <b style="color:#8fd18f">движок АПК (KomaLens)</b> — сайт не открывается.'
-      : tr.includes('relay')
-        ? 'Прямой путь: <b style="color:#8fd18f">свой релей</b> — сайт не открывается.'
-        : 'Прямой путь не настроен: в браузере Google не отдаёт ответ чужой странице. '
-          + 'В АПК подключится движок сам. Пока — «Открыть сайт» или вставка текста.';
-  }
-  const hint2 = $('#engineHint2');
-  if (hint2) {
-    hint2.innerHTML = LENS.isLens()
-      ? '<b style="color:#ffd2d2">Сейчас включён Google Lens.</b> Кнопка «Распознать» отправит кадр страницы в Google и откроет Lens новой вкладкой. Текст вернётся через «Вставить текст из Lens».'
-      : '<b>В файле</b> — распознавание целиком на телефоне, ни один кадр никуда не уходит. <b>Google Lens</b> — отдельный движок для трудных страниц (чужой шрифт, старый скан): страница уходит в Google, текст возвращается кнопкой «Вставить текст из Lens» и дальше работает как обычный текст реплик.';
-  }
+  if (hdr) hdr.style.display = 'none';        // кнопки Lens больше нет
   const sub = $('#rSub');
-  if (sub && Reader && Reader.pages && Reader.pages.length) {
-    sub.textContent = LENS.isLens() ? 'KOMA · Google Lens' : 'KOMA · в файле';
-  }
-  const ort = $('#ortState');
-  if (ort && LENS.isLens()) {
-    ort.textContent = 'Движок: Google Lens — страница уходит в интернет, локальные модели не используются';
-  }
-  // Обещание «ни один кадр никуда не отправляется» верно ТОЛЬКО в офлайн-режиме,
-  // поэтому с включённым Lens эту строку нельзя показывать как есть.
+  if (sub && Reader && Reader.pages && Reader.pages.length) sub.textContent = 'KOMA · в файле';
   const priv = $('#privacyNote');
   if (priv) {
-    priv.textContent = LENS.isLens()
-      ? 'Сейчас включён Google Lens: по нажатию «Распознать» кадр страницы уходит в Google. Верните «В файле» (офлайн), чтобы ничего не отправлялось.'
-      : 'Распознавание целиком в браузере: ни один кадр никуда не отправляется. Модели хранятся в IndexedDB этого сайта.';
-    priv.style.color = LENS.isLens() ? '#ffd2d2' : '';
+    priv.textContent = 'Распознавание целиком на телефоне: ни один кадр никуда не уходит. '
+      + 'Онлайн остаются только голоса Edge — и только если вы их выбрали сами.';
+    priv.style.color = '';
+  }
+  // Скрываем только то, чего больше нет в разметке; честный текст про движок
+  // (#engineHint2, #engineNote2) остаётся на месте — иначе под заголовком
+  // «ДВИЖОК РАСПОЗНАВАНИЯ» было бы пусто (скриншот 4.11).
+  for (const id of ['engineLocal', 'engineLens', 'engineLocal2', 'engineLens2',
+                    'engineLensNote', 'engineChips', 'engineChips2', 'lensRelayState']) {
+    const el = $('#' + id);
+    if (el) el.style.display = 'none';
   }
 }
 
@@ -981,7 +824,6 @@ async function selfCheck() {
   });
   // Выбранный движок читаем ДО первой страницы: иначе первый же скан мог уйти
   // не туда (в сеть или, наоборот, локально) вопреки сохранённому выбору.
-  await step('движок', () => LENS.load());
   await step('вид движка', () => syncEngineUI());
   await step('плагины', () => Plugins.load());
   await step('правила', async () => {
@@ -1029,7 +871,6 @@ async function selfCheck() {
   await step('сведения о правилах', () => renderRulesInfo());
   await step('плагины: показать', () => syncPluginsUI());
   await step('подсказка о движке', () => {
-    if (LENS.isLens()) toast('Движок из прошлой сессии — Google Lens. Чтобы вернуть офлайн, откройте ⚙ → Модели', 7000);
   });
   await step('баннер среды', () => showEnvBanner());
   await step('самопроверка', () => selfCheck());

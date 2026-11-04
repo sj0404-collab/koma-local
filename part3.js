@@ -40,7 +40,6 @@ const DEFAULT_RULES = {
   frames: true,
   junkRatio: 0.6,          // доля слов не из словаря, при которой строка — мусор
   wordFixes: {},
-  lensRelay: '',           // свой релей для прямого Lens — без открытия сайта
 };
 /**
  * Профили скорости. Замерено на настоящей странице (720×2960, полосы 412×800,
@@ -138,7 +137,6 @@ function sanitizeRules(r, overrides) {
   R.inkLevels = Math.round(R.inkLevels); R.semiManualSettleMs = Math.round(R.semiManualSettleMs);
   R.semiManual = !!R.semiManual;
   if (typeof R.wordFixes !== 'object' || !R.wordFixes) R.wordFixes = {};
-  R.lensRelay = String(R.lensRelay || '').trim().slice(0, 500);
   R.ocrEngine = (R.ocrEngine === 'native' || R.ocrEngine === 'wasm') ? R.ocrEngine : 'auto';
   R.frames = R.frames !== false;
   return R;
@@ -153,32 +151,93 @@ const LOOKALIKES = {
   b: 'в', h: 'н', u: 'и', n: 'п',
   A: 'А', E: 'Е', O: 'О', C: 'С', P: 'Р', X: 'Х', Y: 'У', K: 'К', M: 'М', T: 'Т',
   B: 'В', H: 'Н', U: 'И',
+  // Заглавная латиница, которой модель тоже пишет русские слова («Д» как «D»,
+  // «П» как «N», «Л» как «L»). Раньше этих пар не было, и в реплике оставалась
+  // латинская буква: жалоба 4.11 «в репликах знаки дельта, лямбда вместо
+  // кириллицы» — тот же корень, только греческий.
+  D: 'Д', F: 'Ф', G: 'Г', I: 'И', J: 'Й', L: 'Л', R: 'Р', S: 'С',
+  V: 'В', W: 'Ш', Z: 'З', Q: 'Я',
+  // Латинскую N намеренно не трогаем: она одинаково похожа на «П» и на «И»,
+  // и любое гадание портит слово.
+  // Греческие заглавные: Λ и Δ были, остальные — нет.
   'Λ': 'Л', 'Δ': 'Д', 'Α': 'А', 'Β': 'В', 'Ε': 'Е', 'Ζ': 'З', 'Η': 'Н', 'Ι': 'И',
   'Κ': 'К', 'Μ': 'М', 'Ν': 'Н', 'Ο': 'О', 'Ρ': 'Р', 'Τ': 'Т', 'Υ': 'У', 'Χ': 'Х',
+  'Φ': 'Ф', 'Γ': 'Г', 'Θ': 'О', 'Ω': 'О', 'Σ': 'С', 'Π': 'П',
   '3': 'з', '4': 'ч', '0': 'о', '6': 'б', '8': 'в',
+  // Греческие строчные: λ, θ, ω, ς, φ в таблице отсутствовали — они и попадали
+  // в реплики как есть («λЮБОВЬ», «ΔλЯ»).
   'α': 'а', 'β': 'в', 'γ': 'г', 'δ': 'д', 'ε': 'е', 'ζ': 'з', 'η': 'н', 'ι': 'и',
   'κ': 'к', 'μ': 'м', 'ν': 'п', 'ο': 'о', 'π': 'п', 'ρ': 'р', 'σ': 'с', 'τ': 'т',
-  'υ': 'у', 'χ': 'х',
+  'υ': 'у', 'χ': 'х', 'λ': 'л', 'θ': 'о', 'ω': 'о', 'ς': 'с', 'φ': 'ф',
   l: 'л', d: 'д', g: 'г', f: 'ф', r: 'г', s: 'с', v: 'в', w: 'ш', z: 'з', j: 'й', i: 'и',
   q: 'я',
 };
-const GREEK = new Set(['Λ', 'Δ', 'Α', 'Β', 'Ε', 'Ζ', 'Η', 'Ι', 'Κ', 'Μ', 'Ν', 'Ο', 'Ρ', 'Τ', 'Υ', 'Χ']);
+/**
+ * БАЗОВЫЙ набор двойников — ровно те пары, что были до задачи 130.
+ *
+ * Нужен не «для истории»: на этапе сборки строк (source) от него зависит, какие
+ * строки считаются русскими и попадают в облачко. Если расширенной таблицей
+ * пользоваться и там, латинский мусор звуковых эффектов превращается в
+ * «псевдоруские» слова («ЗАМЕЛАТЕ», «АБГТВЕ») и приклеивается к честной
+ * реплике (проверка 4.11 на стр.5 Mieruko-chan). Поэтому расширенная починка
+ * работает ВЫШЕ по конвейеру — на готовой реплике и в cleanSpeech.
+ */
+const LOOKALIKE_BASE = new Set(['a', 'e', 'o', 'c', 'p', 'x', 'y', 'k', 'm', 't', 'b', 'h', 'u', 'n',
+  'A', 'E', 'O', 'C', 'P', 'X', 'Y', 'K', 'M', 'T', 'B', 'H', 'U',
+  'Λ', 'Δ', 'Α', 'Β', 'Ε', 'Ζ', 'Η', 'Ι', 'Κ', 'Μ', 'Ν', 'Ο', 'Ρ', 'Τ', 'Υ', 'Χ',
+  '3', '4', '0', '6', '8',
+  'α', 'β', 'γ', 'δ', 'ε', 'ζ', 'η', 'ι', 'κ', 'μ', 'ν', 'ο', 'π', 'ρ', 'σ', 'τ', 'υ', 'χ',
+  'l', 'd', 'g', 'f', 'r', 's', 'v', 'w', 'z', 'j', 'i', 'q']);
+
+const GREEK = new Set(['Λ', 'Δ', 'Α', 'Β', 'Ε', 'Ζ', 'Η', 'Ι', 'Κ', 'Μ', 'Ν', 'Ο', 'Ρ', 'Τ',
+  'Υ', 'Χ', 'Φ', 'Γ', 'Θ', 'Ω', 'Σ', 'Π']);
 const isRusLetter = (ch) => /^[а-яё]$/i.test(ch);
 
-function fixLookalikes(raw) {
+/**
+ * Настоящие латинские слова, которые в русской реплике надо оставить как есть.
+ * Без этого списка «LINE» превращался в «ЛИПЕ» (в таблице появились L и E),
+ * а название приложения — в «КОМА» (проверка 4.11, tools/test_lookalikes.cjs).
+ */
+const LATIN_KEEP = new Set(['LINE', 'WIFI', 'WI-FI', 'WI', 'FI', 'OK', 'NG', 'SNS',
+  'TV', 'PC', 'ID', 'AI', 'SMS', 'MMS', 'GPS', 'USB', 'PDF', 'DVD', 'APP', 'APPS',
+  'KOMA', 'KOMALENS', 'ONLINE', 'OFFLINE', 'STOP', 'GO', 'YES', 'NO', 'LOVE',
+  'KISS', 'SOS', 'VIP', 'DNA', 'CPU', 'WEB', 'NET', 'COM', 'WWW']);
+
+function fixLookalikes(raw, opts = {}) {
   const lineIsRussian = Array.from(raw).some(ch => isRusLetter(ch) || GREEK.has(ch));
   if (!lineIsRussian) return raw;
   return raw.split(' ').map(word => {
     const letters = Array.from(word).filter(ch => /[\p{L}\p{N}]/u.test(ch));
-    const convertible = letters.length && letters.every(ch => ch in LOOKALIKES);
+    const ok = (ch) => ch in LOOKALIKES && (!opts.base || LOOKALIKE_BASE.has(ch));
+    const convertible = letters.length && letters.every(ok);
     const wordHasRussian = Array.from(word).some(isRusLetter);
+    // В базовом режиме — ровно прежнее поведение (никаких новых ограничений):
+    // от него зависит, какие строки попадут в облачко, и оно не должно меняться.
+    if (convertible && !wordHasRussian && !opts.base) {
+      const core = letters.join('');
+      // Целиком латинское слово переводим ТОЛЬКО если получается словарное
+      // русское слово. Расширенная таблица иначе превращала латинский мусор
+      // звуковых эффектов в «псевдорусские» слова: они проходили фильтр
+      // «в реплике кириллица» и приклеивались к честным строкам («НЕ ВИДИ
+      // МЕНЯ ЗАМЕ ЛАТЕ М И АБГТВЕ», проверка 4.11 на стр.5 Mieruko-chan).
+      // Строки, целиком набранные двойниками («MHE TAK»), идут другим путём —
+      // через isLookalikeOnly в cleanSpeech.
+      const mapped = Array.from(core).map(ch => LOOKALIKES[ch]).join('');
+      const known = (typeof Words !== 'undefined' && Words && Words.isKnown)
+        ? Words.isKnown(mapped) : false;
+      if (LATIN_KEEP.has(core.toUpperCase()) || !known) return word;
+    }
     if (!(wordHasRussian || convertible)) return word;
     // Если в слове нет строчных букв, то и подстановка должна быть заглавной:
     // «3ВУ4ИТ» → «ЗВУЧИТ», а не «зВУчИТ».
     const hasLower = Array.from(word).some(ch => /[a-zа-я]/.test(ch));
     return Array.from(word).map(ch => {
+      if (opts.base && !LOOKALIKE_BASE.has(ch)) return ch;
       const m = LOOKALIKES[ch];
       if (m === undefined) return ch;
+      // Мягкий знак в капсе пишется как строчная «b»: «OФUΓETb» → «ОФИГЕТЬ»,
+      // а не «ОФИГЕТВ» (иначе читалка говорит «офигетв»).
+      if (ch === 'b' && !hasLower) return 'Ь';
       return hasLower ? m : m.toUpperCase();
     }).join('');
   }).join(' ');
@@ -248,16 +307,51 @@ function cyrifySingleLetters(text) {
   }).join('');
 }
 
+/**
+ * Добить двойников ВНУТРИ слов — последний проход по готовой реплике.
+ *
+ * Жалоба 4.11: «в репликах знаки дельта, лямбда вместо кириллицы». Основная
+ * починка (fixLookalikes) переводит слово, если в нём есть русская буква, но
+ * она не знала части пар (латинские заглавные D/F/G/I/L/N/R/S/V/W/Z, греческие
+ * λ θ ω ς φ Φ Γ Θ Ω Σ Π), и такая буква оставалась в реплике как есть. Здесь
+ * проход уже по собранной строке: любое слово, где есть хоть одна кириллическая
+ * буква, приводится к кириллице целиком. Слова без кириллицы («LINE», «Wi-Fi»)
+ * не трогаются — это настоящая латиница.
+ */
+function cyrifyInsideWords(text) {
+  const src = String(text || '');
+  if (!src) return src;
+  return src.split(/(\s+)/).map(tok => {
+    if (!/[\u0400-\u04FF]/.test(tok)) return tok;
+    const hasLower = /[a-zа-яё]/.test(tok);
+    const caps = !hasLower && /[A-ZА-ЯЁ]/.test(tok);
+    let out = Array.from(tok).map(ch => {
+      const m = LOOKALIKES[ch];
+      if (m === undefined) return ch;
+      if (ch === 'b' && caps) return 'Ь';
+      return hasLower ? m : m.toUpperCase();
+    }).join('');
+    // Цифра в конце русского слова — это почти всегда «я»: «ПРИС НИТС9» →
+    // «ПРИСНИТСЯ» (замер 4.11, Mieruko-chan, стр.4). Только конец слова и
+    // только при трёх и более кириллических буквах рядом — числа не трогаем.
+    const m = /^(\p{L}{3,})9([^\p{L}]*)$/u.exec(out);
+    if (m && /[\u0400-\u04FF]/.test(m[1])) out = m[1] + (caps ? 'Я' : 'я') + m[2];
+    return out;
+  }).join('');
+}
+
 /** Строка состоит ТОЛЬКО из символов-двойников: «OHO», «4YBC», «MHE TAK». */
-function isLookalikeOnly(text) {
+function isLookalikeOnly(text, opts = {}) {
   const letters = Array.from(text).filter(ch => /[\p{L}\p{N}]/u.test(ch));
-  return letters.length > 0 && letters.every(ch => ch in LOOKALIKES);
+  const ok = (ch) => ch in LOOKALIKES && (!opts.base || LOOKALIKE_BASE.has(ch));
+  return letters.length > 0 && letters.every(ok);
 }
 /** Принудительный перевод всей строки, даже если русских букв в ней нет. */
-function fixLookalikesForced(raw) {
+function fixLookalikesForced(raw, opts = {}) {
   const chars = Array.from(raw);
   const upper = chars.filter(ch => /[A-ZА-Я]/.test(ch)).length > chars.filter(ch => /[a-zа-я]/.test(ch)).length;
   return chars.map(ch => {
+    if (opts.base && !LOOKALIKE_BASE.has(ch)) return ch;
     const m = LOOKALIKES[ch];
     if (m === undefined) return ch;
     return upper ? m.toUpperCase() : m;
@@ -2397,7 +2491,7 @@ function wordColumns(crop, R) {
  * чтобы не тратить время на телефоне.
  */
 /** Кроп с белыми полями: модель видит целые буквы, а не обрезанные края. */
-/** Вырезать прямоугольник страницы в отдельный canvas (для отправки в Lens). */
+/** Вырезать прямоугольник страницы в отдельный canvas (кроп для распознавания и подсветки). */
 function cropCanvas(src, x, y, w, h) {
   const out = makeCanvas(Math.max(1, Math.round(w)), Math.max(1, Math.round(h)));
   out.getContext('2d', { willReadFrequently: true })
@@ -3887,8 +3981,14 @@ function readingOrder(regions, rtl, onlyCyr, R) {
     .map(r => {
       let text = String(r.text || '').replace(/\u00AD/g, '-').replace(/\s+/g, ' ').trim();
       text = applyWordFixes(text, R.wordFixes);
-      const fixed = fixLookalikes(text);
-      if (onlyCyr && !isCyr(fixed) && isLookalikeOnly(fixed)) text = fixLookalikesForced(fixed);
+      // Отбор строк идёт ТОЛЬКО по базовому набору двойников — ровно так, как
+      // было до задачи 130. Расширенная таблица (греческие λ θ ω ς φ, латинские
+      // D/F/L/S/V/W) иначе делает «русским» латинский мусор звуковых эффектов,
+      // и он приклеивается к честным репликам («НЕ ВИДИ МЕНЯ ЗАМЕ ЛАТЕ…»,
+      // проверка 4.11 на стр.5 Mieruko-chan). Расширенная починка работает
+      // ниже по конвейеру — на готовой реплике (display/speech).
+      const fixed = fixLookalikes(text, { base: true });
+      if (onlyCyr && !isCyr(fixed) && isLookalikeOnly(fixed, { base: true })) text = fixLookalikesForced(fixed, { base: true });
       else text = fixed;
       // Ы ↔ В в коротких словах («ТВ ВИДИШЬ» → «ТЫ ВИДИШЬ»).
       text = fixConfusedShortWords(text);
@@ -3938,7 +4038,9 @@ function readingOrder(regions, rtl, onlyCyr, R) {
   // приходит уже после первой чистки («…ПОДНОШЕНИЯ? ж с л»).
   // Регистр — здесь же: сборка реплик идёт мимо cleanSpeech, поэтому «ОНА Вс
   // ШЕПЧЕТ» доходило до экрана как есть (прогон 29.10).
-  for (const l of result) l.text = fixCaseInCaps(trimTailFragments(stripJunkWords(l.text)));
+  for (const l of result) {
+    l.text = cyrifyInsideWords(fixCaseInCaps(trimTailFragments(stripJunkWords(l.text))));
+  }
   let kept = result.filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
   // Приклеиваем инородные обрывки к реплике, из облачка которой они пришли.
   for (const f of foreign) {
@@ -3953,8 +4055,16 @@ function readingOrder(regions, rtl, onlyCyr, R) {
       })
       .sort((a, b) => Math.abs(f.top - a.bottom) - Math.abs(f.top - b.bottom))[0];
     if (!host) continue;
-    const add = cyrifySingleLetters(fixConfusedShortWords(fixLookalikes(String(f.text || '').trim())));
+    const add = cyrifyInsideWords(cyrifySingleLetters(fixConfusedShortWords(fixLookalikes(String(f.text || '').trim()))));
     if (!add) continue;
+    // Обрывок приклеиваем, только если это осмысленный текст. После расширения
+    // таблицы двойников латинский мусор звуковых эффектов стал превращаться в
+    // «псевдорусские» слова и приклеивался к честной реплике: «НЕ ВИДИ МЕНЯ
+    // ЗАМЕ ЛАТЕ М И АБГТВЕ» (проверка 4.11, Mieruko-chan, стр.5). Правило:
+    // если в обрывке есть русские слова, хотя бы одно должно быть в словаре;
+    // настоящая латиница («LINE») проходит как есть.
+    const addWords = (add.match(/[А-Яа-яЁё]{3,}/g) || []);
+    if (addWords.length && !addWords.some(w => Words.isKnown(w) || Words.inDict(w))) continue;
     // Куда именно вставить. Хвост в конце строки — это конец облачка («…В LINE»),
     // но обрывок бывает и В СЕРЕДИНЕ: на стр.6 Mieruko-chan строка СТРАШНЫХ
     // прочлась латиницей и приклеивалась в конец — «МНОГО ВЕЩЕЙ.. СТРАШНЫХ»
@@ -4307,294 +4417,15 @@ function cutAtBandBottom(line, band, cutMargin) {
 }
 
 /**
- * ─── Google Lens как ОТДЕЛЬНЫЙ движок ────────────────────────────────────────
+ * ─── Здесь БЫЛ второй движок: Google Lens ────────────────────────────────────
  *
- * Зачем. Своя модель на манге даёт 4,8 % CER против 2,7 % у штатной, а на
- * чужих страницах (журналы 1988–2001 из archive.org) читалка находит меньше
- * трети строк — шрифт, вёрстка и печать другие. Lens читает такое заметно
- * лучше, но НЕ умеет работать офлайн и отправляет картинку в Google.
+ * Убран 4.11 по прямой просьбе: «убери такой lens, который не читает реплики
+ * напрямую, их не распознаёт, а требует в отдельном окне в гугл, а не в фоне».
+ * Он и правда не читал страницу сам: отправлял картинку в Google новой вкладкой
+ * и просил человека перенести текст руками.
  *
- * Как устроено и почему именно так:
- *  • Модели и текст по-прежнему обрабатываются локально, а Lens — это ЯВНО
- *    включаемый второй движок. Пока режим «локально» (по умолчанию), ни один
- *    байт картинки никуда не уходит: send() в этом режиме даже не строит форму.
- *  • Отправка — обычная отправка ФОРМЫ в новую вкладку (`enctype=multipart`,
- *    поле `encoded_image`), а не fetch: навигацию окна CORS не ограничивает,
- *    поэтому это работает и из файла `file://`, где XHR к чужому домену
- *    невозможен. Проверено 28.10 в Chromium: Lens принимает файл и отвечает
- *    страницей результатов (из песочницы IP попал под проверку на робота, но
- *    сам аплоад прошёл — в обычном браузере открывается страница «Текст»).
- *  • Прочитать результат из другой вкладки нельзя (чужой домен). Поэтому
- *    текст возвращается ЧЕРЕЗ ЧЕЛОВЕКА: «Вставить из буфера» одной кнопкой
- *    (navigator.clipboard.readText в жесте) или вставкой в поле. Дальше эти
- *    строки живут как обычные реплики страницы: рамки, порядок, озвучка.
- *  • Никаких confirm()/prompt() — только тост и шторка.
+ * Остался ОДИН движок — тот же, что в первой читалке (Yomikai): локальные
+ * модели ONNX детектируют облачка и распознают текст в фоне, прямо в странице,
+ * без интернета. Резерв, если нативный путь недоступен, — тот же ONNX через
+ * WASM (RULES.ocrEngine = 'native' | 'wasm' | 'auto').
  */
-const LENS = {
-  mode: 'local',                     // local | lens
-  action: 'https://lens.google.com/v3/upload?hl=ru&ep=ccm',
-  lastSentAt: 0, lastSentPage: null,
-  pendingPage: null,                 // страница, для которой ждём текст от Lens
-
-  isLens() { return this.mode === 'lens'; },
-
-  /** Прочитать сохранённый выбор движка. */
-  async load() {
-    try {
-      const row = await DB.get('kv', 'engine:mode');
-      this.mode = (row && row.v === 'lens') ? 'lens' : 'local';
-    } catch (e) { this.mode = 'local'; }
-    return this.mode;
-  },
-
-  /** Сохранить выбор. Кнопка «Движок: …» работает без confirm(). */
-  async setMode(mode) {
-    this.mode = mode === 'lens' ? 'lens' : 'local';
-    try { await DB.put('kv', { k: 'engine:mode', v: this.mode }); } catch (e) { /* некуда сохранить — не беда */ }
-    return this.mode;
-  },
-
-  /**
-   * Картинка страницы (или видимой полосы) → файл для формы.
-   * Синхронно через toDataURL: отправка идёт из жеста пользователя, и ждать
-   * промис toBlob нельзя — браузер уже считает жест «законченным» и может
-   * заблокировать открытие вкладки.
-   */
-  toFile(canvas, name) {
-    const url = canvas.toDataURL('image/png');
-    const b64 = url.slice(url.indexOf(',') + 1);
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return new File([bytes], name || 'page.png', { type: 'image/png' });
-  },
-
-  /**
-   * Отправить страницу в Lens новой вкладкой. Возвращает { ok, reason }.
-   * В режиме «локально» ничего не отправляет — это и есть защита от случайной
-   * утечки картинки в сеть.
-   */
-  send(canvas, opts = {}) {
-    if (!this.isLens() && !opts.force) {
-      return { ok: false, reason: 'движок «локально» — картинка никуда не отправлялась' };
-    }
-    if (!canvas || !canvas.width) return { ok: false, reason: 'страница ещё не загрузилась' };
-    try {
-      const file = this.toFile(canvas, 'koma-page.png');
-      const dt = new DataTransfer();
-      dt.items.add(file);
-      const form = document.createElement('form');
-      form.method = 'POST';
-      form.enctype = 'multipart/form-data';
-      form.target = '_blank';                 // новая вкладка, читалка остаётся
-      form.action = this.action;
-      form.style.display = 'none';
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.name = 'encoded_image';
-      input.id = 'lensFile';
-      input.files = dt.files;                 // так файл и передаётся без выбора вручную
-      form.appendChild(input);
-      const dim = document.createElement('input');
-      dim.type = 'hidden';
-      dim.name = 'processed_image_dimensions';
-      dim.value = canvas.width + ',' + canvas.height;
-      form.appendChild(dim);
-      document.body.appendChild(form);
-      form.submit();
-      setTimeout(() => form.remove(), 4000);  // разметку за собой убираем
-      this.lastSentAt = Date.now();
-      this.pendingPage = opts.page ?? null;
-      return { ok: true, page: this.pendingPage, size: [canvas.width, canvas.height] };
-    } catch (e) {
-      return { ok: false, reason: String((e && e.message) || e) };
-    }
-  },
-
-  /**
-   * Текст из Lens → реплики страницы. Геометрия приблизительная (Lens не отдаёт
-   * координаты нам), зато порядок сверху вниз сохраняется, рамки показывают
-   * номера реплик, и озвучка работает тем же путём, что всегда.
-   */
-  /* ── ПРЯМОЕ РАСПОЗНАВАНИЕ: как в АПК, без открытия сайта ──────────────────
-     В АПК Lens — это не «открыть сайт», а движок: приложение само отправляет
-     картинку и само забирает текст (GlensOcrEngine, protobuf). В обычной вкладке
-     браузера так нельзя: Google не отдаёт CORS-заголовки, и прочитать ответ
-     чужой странице он не даёт. Поэтому прямой путь идёт по одному из двух
-     транспортов, и оба не открывают никаких сайтов:
-
-       native  — window.KomaLens.recognize(base64jpeg): мост в АПК. WebView зовёт
-                 тот самый GlensOcrEngine, что уже работает в приложении;
-       relay   — свой адрес (RULES.lensRelay): страница шлёт картинку туда, а
-                 релей возвращает текст (Cloudflare Worker / Node / VPS, 20 строк;
-                 готовый файл — lab/lens_relay.js). Тоже без сайта.
-
-     Если ни одного транспорта нет — честно говорим, что прямой путь недоступен,
-     и оставляем прежнюю кнопку «Открыть в Lens» как ЯВНЫЙ выбор человека. */
-  transports() {
-    const list = [];
-    // Достаточно ЛЮБОГО из двух вызовов моста: асинхронный (предпочтительный)
-    // или синхронный. Иначе мост есть, а страница считает, что движка нет.
-    const kl = (typeof window !== 'undefined') ? window.KomaLens : null;
-    if (kl && (typeof kl.recognizeAsync === 'function' || typeof kl.recognize === 'function')) {
-      list.push('native');
-    }
-    if (RULES && RULES.lensRelay) list.push('relay');
-    return list;
-  },
-  hasDirect() { return this.transports().length > 0; },
-
-  /** Кадр → JPEG base64. Прямой путь не требует жеста, поэтому можно сжимать:
-   *  на глаз для распознавания хватает 78 % и стороны 1500 px. */
-  toJpegBase64(canvas, maxSide = 1500, quality = 0.78) {
-    if (!canvas || !canvas.width) return '';
-    const k = Math.min(1, maxSide / Math.max(canvas.width, canvas.height));
-    let src = canvas;
-    if (k < 1) {
-      src = makeCanvas(Math.round(canvas.width * k), Math.round(canvas.height * k));
-      const g = src.getContext('2d', { willReadFrequently: true });
-      g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
-      g.drawImage(canvas, 0, 0, src.width, src.height);
-    }
-    const url = src.toDataURL('image/jpeg', quality);
-    return url.slice(url.indexOf(',') + 1);
-  },
-
-  /** Разобрать ответ релея: принимаем и голый текст, и JSON, и HTML от Google. */
-  parseResponse(body, contentType) {
-    const raw = String(body || '');
-    const ct = String(contentType || '');
-    // 1) JSON — самый удобный формат для своего релея.
-    if (/json/i.test(ct) || /^\s*[[{]/.test(raw)) {
-      try {
-        const data = JSON.parse(raw);
-        const fromObj = (o) => {
-          if (!o) return null;
-          if (typeof o === 'string') return o.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
-          if (Array.isArray(o)) return o.map(x => (typeof x === 'string' ? x : (x && (x.text || x.words)))).filter(Boolean);
-          for (const k of ['lines', 'text', 'regions', 'result', 'ocr']) {
-            if (o[k] != null) return fromObj(o[k]);
-          }
-          return null;
-        };
-        const lines = fromObj(data);
-        if (lines && lines.length) return lines;
-      } catch (e) { /* не JSON — идём дальше */ }
-    }
-    // 2) HTML от Lens: текст лежит внутри AF_initDataCallback. Достаём из него
-    //    строки, которые состоят из букв, и склеиваем по одной реплике в строку.
-    const html = raw;
-    const looksHtml = /<html|<!doctype|AF_initDataCallback/i.test(html);
-    if (looksHtml) {
-      let best = [];
-      const chunks = html.split('AF_initDataCallback');
-      for (const ch of chunks) {
-        // В данных Lens строка реплики — это JSON-строка с текстом.
-        // В данных Lens текст бывает с \uXXXX-экранированием, поэтому обратный
-        // слэш в строке разрешён (иначе «\u041c» рвал совпадение).
-        const strs = [...ch.matchAll(/"((?:\\.|[^"\\]){2,160})"/g)]
-          .map(m => m[1].replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16))));
-        // Раскодировали \uXXXX ДО проверки: иначе строка «\u041c\u0430…» выглядит
-        // как латиница с обратными слэшами и отбрасывается как не-текст.
-        const cyr = strs.filter(t => (t.match(/[А-Яа-яЁё]/g) || []).length >= 3
-          && (t.match(/\p{L}/gu) || []).length / t.length > 0.55);
-        if (cyr.length > best.length) best = cyr;
-      }
-      if (best.length) return best.filter(t => (t.match(/\p{L}/gu) || []).length >= 2);
-    }
-    // 3) Голый текст: по строке на реплику.
-    return raw.split(/\r?\n/).map(s => s.trim())
-      .filter(s => (s.match(/\p{L}/gu) || []).length >= 2);
-  },
-
-  /** Прямое распознавание кадра. Возвращает { ok, lines, via, reason }. */
-  async recognizeDirect(canvas, opts = {}) {
-    if (!this.isLens() && !opts.force) return { ok: false, reason: 'движок «в файле» — ничего не отправлял', via: null };
-    const via = this.transports()[0];
-    if (!via) return { ok: false, reason: 'прямой путь недоступен', via: null };
-    const b64 = this.toJpegBase64(canvas, opts.maxSide || 1500, opts.quality || 0.78);
-    if (!b64) return { ok: false, reason: 'страница ещё не загрузилась', via };
-    const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-    try {
-      let lines = null;
-      if (via === 'native') {
-        // Мост в АПК. Предпочитаем асинхронный вызов: он не держит поток JS,
-        // поэтому бейдж «распознаю…» рисуется, пока идёт запрос к Google.
-        const opts = { lang: (RULES && RULES.lang) || 'ru' };
-        const res = (typeof window.KomaLens.recognizeAsync === 'function')
-          ? await new Promise((resolve) => {
-              const id = 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-              const reg = (window.__komaLensResolve = window.__komaLensResolve || {});
-              const timer = setTimeout(() => {
-                delete reg[id];
-                resolve(JSON.stringify({ error: 'движок АПК не ответил за 60 с' }));
-              }, 60000);
-              reg[id] = (json) => { clearTimeout(timer); delete reg[id]; resolve(json); };
-              try {
-                window.KomaLens.recognizeAsync(b64, JSON.stringify(opts), id);
-              } catch (e) {
-                clearTimeout(timer); delete reg[id];
-                resolve(JSON.stringify({ error: String((e && e.message) || e) }));
-              }
-            })
-          : await window.KomaLens.recognize(b64, opts);
-        // Ошибку моста показываем как есть: «ответ пустой» тут соврёт.
-        let obj = null;
-        if (res && typeof res === 'object') obj = res;
-        else {
-          try { obj = JSON.parse(String(res || '')); } catch (e) { obj = null; }
-        }
-        if (obj && obj.error) return { ok: false, via, reason: String(obj.error) };
-        // Мост в АПК: сюда приходит либо строка, либо массив, либо объект.
-        lines = Array.isArray(res) ? res : this.parseResponse(
-          typeof res === 'string' ? res : JSON.stringify(res || ''), 'application/json');
-      } else {
-        const form = new FormData();
-        form.append('encoded_image', new Blob([this._b64bytes(b64)], { type: 'image/jpeg' }), 'page.jpg');
-        const r = await fetch(RULES.lensRelay, { method: 'POST', body: form, mode: 'cors' });
-        const text = await r.text();
-        if (!r.ok) return { ok: false, via, reason: 'релей ответил ' + r.status + ': ' + text.slice(0, 160) };
-        lines = this.parseResponse(text, r.headers.get('content-type') || '');
-      }
-      lines = (lines || []).filter(s => s && (s.match(/\p{L}/gu) || []).length >= 2);
-      if (!lines.length) return { ok: false, via, reason: 'ответ пустой — текста в нём нет' };
-      const ms = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0);
-      this.lastSentAt = Date.now();
-      this.lastDirect = { via, ms, lines: lines.length };
-      return { ok: true, lines, via, ms };
-    } catch (e) {
-      // Для релея самая частая причина — CORS: браузер не дал прочитать ответ.
-      const msg = String((e && e.message) || e);
-      const cors = /Failed to fetch|NetworkError|CORS/i.test(msg);
-      return {
-        ok: false, via,
-        reason: cors
-          ? 'релей не отдал CORS-заголовки (Access-Control-Allow-Origin) — браузер не дал прочитать ответ'
-          : msg.slice(0, 200),
-      };
-    }
-  },
-  _b64bytes(b64) {
-    const bin = atob(b64);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-  },
-
-  textToLines(text) {
-    // Принимаем и строку, и массив строк (массив удобнее вызывать из тестов и
-    // из кода: String([...]) склеил бы всё через запятую в одну «строку»).
-    const src = Array.isArray(text) ? text.join('\n') : String(text || '');
-    const rows = src
-      .split(/\r?\n/)
-      .map(s => s.replace(/\s+/g, ' ').trim())
-      .filter(s => (s.match(/\p{L}/gu) || []).length >= 2);
-    const n = rows.length || 1;
-    return rows.map((t, i) => ({
-      text: t,
-      left: 0.04, right: 0.96,
-      top: +(i / n).toFixed(4), bottom: +(((i + 1) / n) - 0.002).toFixed(4),
-      confidence: 1, large: false, bandTop: 0, fromLens: true,
-    }));
-  },
-};
