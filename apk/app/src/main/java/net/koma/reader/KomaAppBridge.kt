@@ -29,7 +29,8 @@ class KomaAppBridge(
     @JavascriptInterface
     fun checkUpdate(cbId: String) {
         val done = JSONObject().put("updated", false)
-            .put("reason", "локальная сборка: без интернета и без обновлений")
+            .put("ok", true)
+            .put("reason", "Локальная сборка: обновлений нет — это нормально")
             .toString()
         post(cbId, "done", done)
     }

@@ -307,6 +307,7 @@ function bindUI() {
       let res = {};
       try { res = JSON.parse(json || '{}'); } catch (e) { res = { updated: false, reason: String(json) }; }
       if (res.updated) toast('Обновлено до ' + res.version + ' — перезагружаю…', 5000);
+      else if (res.ok && res.reason) toast(String(res.reason), 6000);
       else if (res.reason) toast(String(res.reason).startsWith('уже свежая')
         ? 'Обновлений нет: ' + res.reason
         : 'Обновление не удалось: ' + res.reason, 7000);

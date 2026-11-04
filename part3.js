@@ -597,6 +597,9 @@ function mergeSplitTokens(text) {
   for (let i = out.length - 1; i >= 0; i--) {
     const m = /^([А-Яа-яЁё]+)-([А-Яа-яЁё]+)$/.exec(out[i]);
     if (!m) continue;
+    // «ИЗ-ЗА» — настоящее слово С ДЕФИСОМ (частота 183), и разрывать его нельзя:
+    // проверять надо само слово с дефисом, а не слипшуюся форму «изза».
+    if (Words.rank.has(out[i].toLowerCase())) continue;
     const r = Words.rank.get((m[1] + m[2]).toLowerCase());
     if (r !== undefined && r <= Words.KNOWN_RANK) continue;
     out.splice(i, 1, m[1], m[2]);
@@ -719,6 +722,16 @@ function polishLineText(raw) {
   text = text
     .replace(/([А-Яа-яЁё]{2,})([A-Za-z]{1,4})(?![A-Za-zА-Яа-яЁё])/g, '$1')
     .replace(/(^|[^A-Za-zА-Яа-яЁё])([A-Za-z]{1,4})([А-Яа-яЁё]{3,})/g, '$1$3');
+  // Одиночная латиница и латиница с цифрой — это не слово, а мусор от
+  // логотипа, эффекта или «aw» из «ПОДУМАЛАw»: на телефоне 4.11 в реплике
+  // звучало «ЭЙ, МИЧИРУЯ ТУТ ПОДУМАЛ АШ». Правило узкое: слова из 4+ латинских
+  // букв остаются («В LINE» — настоящее), короткие и с цифрами — нет.
+  if ((text.match(/[А-Яа-яЁё]/g) || []).length >= 2) {
+    text = text.split(' ')
+      .filter(t => !/^[A-Za-z]{1,3}$/.test(t))
+      .filter(t => !/^(?=.*\d)[0-9A-Za-z]{1,5}$/.test(t))
+      .join(' ');
+  }
   text = cyrifyInsideWords(fixLookalikes(text));
   text = splitGluedWords(text);
   text = mergeSplitTokens(text);
