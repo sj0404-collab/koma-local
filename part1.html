@@ -433,6 +433,22 @@
         <span class="kv" style="min-width:72px">Синтез</span>
         <select id="selTtsEngine" style="max-width:62%;background:#12160f;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:7px"></select>
       </div>
+      <!-- Онлайн-голоса Microsoft Edge: живые нейроголоса без ключей и сервера.
+           Работают по сети — это сказано прямо здесь, а не спрятано. -->
+      <div class="row" style="gap:8px;align-items:center;margin-top:6px">
+        <span class="kv" style="min-width:72px">Онлайн</span>
+        <select id="selEdgeVoice" style="max-width:62%;background:#12160f;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:7px">
+          <option value="">выключен</option>
+          <option value="ru-RU-DmitryNeural">Edge: Дмитрий (ru)</option>
+          <option value="ru-RU-SvetlanaNeural">Edge: Светлана (ru)</option>
+          <option value="ru-RU-DariyaNeural">Edge: Дария (ru)</option>
+          <option value="en-US-AriaNeural">Edge: Aria (en)</option>
+        </select>
+      </div>
+      <div class="hint" id="edgeHint" style="font-size:12px;line-height:1.35;margin-top:4px">
+        Голоса Edge синтезируются по интернету (Microsoft speech.platform.bing.com):
+        ни ключа, ни аккаунта не нужно, текст нигде не хранится. Без сети читает системный голос.
+      </div>
     </div>
     <div class="row" style="justify-content:space-between;padding:6px 0">
       <span>Скорость голоса</span>

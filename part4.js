@@ -1142,9 +1142,14 @@ const VOICE = {
   synth() {
     return (typeof speechSynthesis !== 'undefined') ? speechSynthesis : null;
   },
-  available() { return this.native() || !!this.synth(); },
+  /** Онлайн-голос Edge выбран и возможен (см. part4a-edge.js). */
+  edge() { return (typeof EDGE !== 'undefined') && EDGE.active(); },
+  available() { return this.edge() || this.native() || !!this.synth(); },
   /** Чей это голос — для проверок и для честных сообщений человеку. */
-  kind() { return this.native() ? 'Android TTS (АПК)' : (this.synth() ? 'Web Speech' : null); },
+  kind() {
+    if (this.edge()) return 'Edge TTS (онлайн)';
+    return this.native() ? 'Android TTS (АПК)' : (this.synth() ? 'Web Speech' : null);
+  },
 
   /** Список голосов в одном формате: {name, lang, voiceURI}. */
   voices() {
@@ -1187,6 +1192,13 @@ const VOICE = {
 
   /** Короткая причина состояния голоса — для честных сообщений человеку. */
   statusText() {
+    if (this.edge()) {
+      const bits = [EDGE.label()];
+      if (!EDGE.uaOk()) bits.push('User-Agent без Edg/ — сервер откажет');
+      const err = EDGE.lastError();
+      if (err) bits.push(err);
+      return bits.join(', ');
+    }
     if (!this.native()) {
       const sw = this.synth();
       if (!sw) return 'синтеза речи нет';
@@ -1217,12 +1229,15 @@ const VOICE = {
 
   cancel() {
     this.speaking = false; this.paused = false; this._handlers = {};
+    if (this.edge()) { try { EDGE.stop(); } catch (e) { /* ignore */ } }
     if (this.native()) { try { window.KomaSpeech.cancel(); } catch (e) { /* моста уже нет */ } }
     const sw = this.synth();
     if (sw) { try { sw.cancel(); } catch (e) { /* ignore */ } }
   },
   pause() {
     this.paused = true;
+    // Edge играет mp3 в <audio>: там пауза настоящая, без перезапуска реплики.
+    if (this.edge()) { return EDGE.pause() ? 'pause' : 'restart'; }
     const sw = this.synth();
     if (this.native()) {
       // У Android TTS паузы нет: честно останавливаем и запоминаем, что читаем.
@@ -1236,6 +1251,7 @@ const VOICE = {
   },
   resume() {
     this.paused = false;
+    if (this.edge()) { return EDGE.resume(); }
     const sw = this.synth();
     if (sw && !this.native()) { try { sw.resume(); } catch (e) {} return true; }
     return false;
@@ -1254,6 +1270,21 @@ const VOICE = {
         window.KomaUi.spoken(String(text || ''));
       }
     } catch (e) { /* моста нет — обычный браузер */ }
+    // Онлайн-голос Edge — выше системного: если человек его выбрал, читает он.
+    // Ошибку не глотаем: причина уходит в onerror и на экран (тост «Голос не
+    // сказал: edge:…»), иначе это выглядело бы как молчание читалки.
+    if (this.edge()) {
+      const ok = EDGE.speak(String(text || ''), {
+        rate: opts.rate,
+        onstart: () => { VOICE.speaking = true; if (opts.onstart) opts.onstart(); },
+        onend: () => { VOICE.speaking = false; if (opts.onend) opts.onend(); },
+        onerror: (e) => {
+          VOICE.speaking = false;
+          if (opts.onerror) opts.onerror({ error: String((e && e.error) || 'edge') });
+        },
+      });
+      return !!ok;
+    }
     if (this.native()) {
       const id = 'v' + (++this._seq) + '_' + Date.now().toString(36);
       this._handlers[id] = opts;
@@ -1525,6 +1556,23 @@ const TTS = {
         }
       }
     } catch (e) { /* в браузере движков нет — это нормально */ }
+    // Онлайн-голос Edge: выбор запоминается сразу, без перезапуска читалки.
+    try {
+      const selEdge = $('#selEdgeVoice');
+      if (selEdge && typeof EDGE !== 'undefined') {
+        selEdge.value = EDGE.chosen();
+        selEdge.onchange = (e) => {
+          EDGE.setChosen(e.target.value || '');
+          if (EDGE.chosen()) {
+            toast(EDGE.uaOk()
+              ? 'Онлайн-голос: ' + EDGE.label() + '. Нужен интернет.'
+              : 'Онлайн-голос выбран, но эта обёртка не пускает Edge (User-Agent без Edg/)', 6000);
+          } else {
+            toast('Онлайн-голос выключен — читает системный', 3000);
+          }
+        };
+      }
+    } catch (e) { console.warn('выбор онлайн-голоса', e); }
     $('#selVoice').onchange = (e) => {
       // «default» — это выбор системного голоса, а не отсутствие выбора.
       if (e.target.value === 'default') {
@@ -1635,7 +1683,9 @@ const TTS = {
    */
   prime() {
     // В АПК голос нативный: там нет правила «только из жеста», разблокировать нечего.
-    if (VOICE.native()) { this.primed = true; return; }
+    // Edge играет mp3 в <audio> и тоже не требует «разблокировки» — а пустая
+    // фраза « » у него стоила бы отдельного сетевого запроса на каждое чтение.
+    if (VOICE.native() || VOICE.edge()) { this.primed = true; return; }
     try {
       if (!VOICE.synth()) return;
       if (this.primed) { VOICE.resume(); return; }
@@ -1670,7 +1720,9 @@ const TTS = {
       toast('В этой среде нет синтеза речи: ни системного голоса, ни движка АПК', 8000);
       return;
     }
-    const avail = VOICE.voices();
+    // Онлайн-голос Edge не зависит от списка голосов Android: там свой голос,
+    // и предупреждение «система не дала ни одного голоса» к нему не относится.
+    const avail = VOICE.edge() ? [{ name: EDGE.label(), lang: 'ru-RU', voiceURI: 'edge' }] : VOICE.voices();
     if (!avail.length) {
       if (VOICE.native()) {
         // В АПК список голосов даёт Android. Пустой список ≠ «нет синтеза»:
@@ -1815,7 +1867,10 @@ const TTS = {
         }
       }, ms);
     };
-    watchdog(1500);
+    // Онлайн-синтез идёт по сети (плюс сеть у телефона может быть медленной),
+    // поэтому для Edge ждём дольше — иначе «не заговорил» срабатывало бы на
+    // каждом нормальном ответе сервера.
+    watchdog(VOICE.edge() ? 9000 : 1500);
     // Прокрутка — ПОСЛЕ запуска речи и в try: ошибка геометрии не должна съедать звук.
     try { this.followLine(line); } catch (e) { console.warn('не прокрутил к реплике', e); }
     // Пока звучит эта реплика — тихо распознаём следующую полосу. Так переход
@@ -1986,6 +2041,14 @@ const TTS = {
     const line = this.queue[this.idx++];
     this.curLine = line;                       // что звучит — для панели и ⟲
     this.curIdx = this.idx;
+    // Онлайн-голос: следующую реплику синтезируем ПОКА звучит эта. Иначе
+    // между репликами пауза 0,8–4 с (сеть), и чтение выглядит рваным.
+    try {
+      if (VOICE.edge()) {
+        const next = this.queue[this.idx];
+        if (next && next.text) EDGE.prefetch(next.text, this.rate);
+      }
+    } catch (e) { /* заготовка не должна мешать чтению */ }
     $('#playStatus').textContent = (RULES.semiManual && State.semi) ? 'ждём прокрутки' : '';
     NATIVE_UI.push();
     this.speakLine(line, () => { if (!this.stopped) this.step(); });

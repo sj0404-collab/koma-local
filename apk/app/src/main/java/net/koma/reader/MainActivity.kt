@@ -113,7 +113,14 @@ class MainActivity : android.app.Activity() {
             allowContentAccess = true             // выбор файлов моделей из «Файлов»
             mediaPlaybackRequiresUserGesture = false
             cacheMode = WebSettings.LOAD_DEFAULT
-            userAgentString = userAgentString + " KOMAApp/$appVersion"
+            // Онлайн-голоса Edge: сервис Microsoft пускает только браузер Edge и
+            // отвечает 403 любому другому User-Agent (проверено замерами 04.11:
+            // Chrome / HeadlessChrome / Android WebView — 403, а с «Edg/» — mp3).
+            // Поэтому к системному UA добавляем токен Edg той же мажорной версии.
+            // Ничего не подделываем под чужое приложение: UA остаётся честным
+            // «это Chromium такой-то версии», плюс метка своей сборки.
+            val chromeMajor = Regex("Chrome/(\\d+)").find(userAgentString)?.groupValues?.get(1) ?: "143"
+            userAgentString = userAgentString + " Edg/$chromeMajor.0.0.0 KOMAApp/$appVersion"
         }
         // Сборка локальная: сторонние cookie и внешние сайты не нужны вовсе.
         CookieManager.getInstance().setAcceptCookie(false)

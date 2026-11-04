@@ -8,7 +8,7 @@
 set -e
 cd -- "$(dirname -- "$0")"
 
-PARTS="part1.html part0-ort.js part0-wasm.js part0-dict.js part2.js part3.js part4.js part5.js"
+PARTS="part1.html part0-ort.js part0-wasm.js part0-dict.js part2.js part3.js part4a-edge.js part4.js part5.js"
 for f in $PARTS; do
   [ -f "$f" ] || { echo "НЕТ части $f"; exit 1; }
 done
