@@ -953,7 +953,8 @@ const Buffer = {
     // В записи храним ИМЯ КНИГИ, а не только её ключ: тогда даже если ключи
     // когда-нибудь совпадут по префиксу, чужие строки в чужую страницу не
     // попадут — при чтении сверяем книгу ещё раз.
-    await DB.put('kv', { k: key, v: { page, book: Reader.book.id, at: Date.now(), rules: RULES.version, lines } });
+    const build = (typeof VERSION !== 'undefined') ? VERSION : '';
+    await DB.put('kv', { k: key, v: { page, book: Reader.book.id, at: Date.now(), rules: RULES.version, build, lines } });
   },
   async get(page) {
     return (await DB.get('kv', 'buf:' + Reader.book.id + ':' + page))?.v || null;
@@ -976,7 +977,32 @@ const Buffer = {
     if (!prefix) return [];
     const id = Reader.book.id;
     const rows = (await DB.all('kv') || []).filter(r => typeof r.k === 'string' && r.k.startsWith(prefix));
-    return rows.map(r => r.v)
+    // ── ТЕКСТ ПРЕЖНЕЙ СБОРКИ НЕ ПОКАЗЫВАЕМ (1.9.67) ────────────────────────
+    // Буфер строк хранит уже собранные реплики. После обновления читалки они
+    // приходили из базы КАК ЕСТЬ, и человек видел старый мусор в новой версии:
+    // на телефоне 19:58 (v1.9.66) страница 1 читалась «…В НАШУ ШКОЛ?» и
+    // «ПОДУМАЛ АШ», хотя в этой сборке таких строк уже не бывает — они были
+    // записаны в 18:50 на v1.9.64. Чистка это не лечит: «АШ» уже кириллица,
+    // а отрезанный хвост без сырых строк не вернуть.
+    // Поэтому записи другой сборки не отдаём (и подчищаем, чтобы не копились):
+    // страница распознается заново НОВЫМ конвейером.
+    const build = (typeof VERSION !== 'undefined') ? VERSION : '';
+    const stale = [];
+    const fresh = [];
+    for (const r of rows) {
+      const v = r.v;
+      if (!v || typeof v.page !== 'number') continue;
+      if (v.build && build && v.build !== build) { stale.push(r.k); continue; }
+      if (v.textBuild && build && v.textBuild !== build) { stale.push(r.k); continue; }
+      fresh.push(v);
+    }
+    if (stale.length) {
+      for (const k of stale) { try { await DB.del('kv', k); } catch (e) { /* не критично */ } }
+      try {
+        toast('Текст прежней версии читалки забыт: ' + stale.length + ' стр. распознаются заново', 5000);
+      } catch (e) { /* toast может не быть готов */ }
+    }
+    return fresh
       .filter(v => v && typeof v.page === 'number')
       // Записи прежних версий поля book не имеют — их оставляем (ключ уже
       // проверен), а новые обязаны совпасть по книге.
