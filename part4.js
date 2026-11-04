@@ -531,22 +531,28 @@ const Reader = {
       if (res.plan === 'native' && Array.isArray(res.replicas) && res.replicas.length) {
         // Порядок и склейку уже сделал движок чтения в приложении. Здесь только
         // слова: словарь и языковая починка живут в странице (3 МБ словаря).
+        // ВАЖНО: чистка реплики (двойники, цифры, приклеенная латиница,
+        // слипшиеся слова) применяется ЗДЕСЬ, до словаря. Нативный движок
+        // собирает реплики в приложении и идёт мимо конвейера страницы — из-за
+        // этого на телефоне 4.11 оставались «ПОДУМАЛАw», «сапьYwb», «ЗНА4ИТ».
         fresh = res.replicas
           .map(r => ({
             ...r,
-            text: Words.polish(String(r.text || ''), RULES.junkRatio, r.confidence),
+            text: Words.polish(polishLineText(String(r.text || '')), RULES.junkRatio, r.confidence),
           }))
           .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
         // Ни одна прочитанная строка не должна остаться за бортом реплики:
         // именно из-за этого реплики выходили обрезками («НО РАЗВЕ»).
         const rec = recoverLostLines(fresh, res.regions);
         fresh = rec.replicas
-          .map(r => ({ ...r, text: Words.polish(String(r.text || ''), RULES.junkRatio, r.confidence) }))
+          .map(r => ({ ...r, text: Words.polish(polishLineText(String(r.text || '')), RULES.junkRatio, r.confidence) }))
           .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
         OCR.recovered = rec.attached;
         OCR.readPlan = 'native';
       } else {
-        fresh = readingOrder(res.regions, rtl, true, RULES);
+        fresh = readingOrder(res.regions, rtl, true, RULES)
+          .map(l => ({ ...l, text: polishLineText(String(l.text || '')) }))
+          .filter(l => l.text);
         OCR.readPlan = 'page';
       }
       // Края реплик чистим ЗДЕСЬ, на выходе распознавания: обрывок звукового

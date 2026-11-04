@@ -269,7 +269,8 @@ function fixConfusedShortWords(text) {
     // модель читает как «6»/«b», а те переводятся в «Б»/«В» («T6» → «Тб»,
     // «Tb» → «Тв»). Поэтому пробуем весь набор похожих начертаний, а не одну
     // пару: «ТБ» → «ТЫ», «ТВ» → «ТЫ» (замер 04.11, Mieruko-chan, стр.4).
-    const TWINS = { 'В': ['Ы'], 'Ы': ['В'], 'Б': ['Ы'], 'Ь': ['Ы', 'В'] };
+    const TWINS = { 'В': ['Ы'], 'Ы': ['В'], 'Б': ['Ы'], 'Ь': ['Ы', 'В'],
+      'У': ['В'] };  // «УЫ» → «ВЫ» (скриншот с телефона, 4.11)
     for (let i = 0; i < up.length; i++) {
       const ch = up[i];
       const alts = TWINS[ch];
@@ -338,6 +339,99 @@ function cyrifyInsideWords(text) {
     if (m && /[\u0400-\u04FF]/.test(m[1])) out = m[1] + (caps ? 'Я' : 'я') + m[2];
     return out;
   }).join('');
+}
+
+/**
+ * Разбить слипшееся: «ТЫМОЖЕШЬ» → «ТЫ МОЖЕШЬ».
+ *
+ * На телефоне нативный движок иногда склеивает два слова в одно (скриншот 4.11:
+ * «ЗНА4ИТ ТЫМОЖЕШЬ И От НаС УЕХАТЬ?»). Правило узкое: слово, которого нет в
+ * словаре, делим ровно на два, и оба куска должны быть словарными.
+ */
+function splitGluedWords(text) {
+  const src = String(text || '');
+  if (!src) return src;
+  const known = (w) => (typeof Words !== 'undefined' && Words)
+    ? (Words.isKnown(w) || (Words.inDict && Words.inDict(w))) : false;
+  return src.split(' ').map(word => {
+    const core = word.replace(/[^\p{L}]/gu, '');
+    if (core.length < 5 || !/^[А-Яа-яЁё]+$/.test(core)) return word;
+    if (known(core.toLowerCase())) return word;
+    for (let i = 2; i <= core.length - 2; i++) {
+      const a = core.slice(0, i), b = core.slice(i);
+      if (known(a.toLowerCase()) && known(b.toLowerCase())) {
+        return word.replace(core, a + ' ' + b);
+      }
+    }
+    return word;
+  }).join(' ');
+}
+
+/**
+ * Склеить слово, разорванное на две половины: «СОБИРА ЮСЬ.» → «СОБИРАЮСЬ.».
+ *
+ * Со скриншота телефона 4.11: нативный движок режет слово на две строки, а
+ * страница получает их одной репликой. glueSplitWords такой случай не ловит —
+ * он требует, чтобы обе половины были без знаков, а тут точка. Правило узкое:
+ * склеиваем, только если СЛИТНОЕ слово есть в словаре, а вторая половина сама
+ * по себе НЕ является частым словом (иначе «ЕСЛИ БЫ» превратилось бы в «ЕСЛИБЫ»).
+ */
+function glueBrokenHalves(text) {
+  const src = String(text || '');
+  if (typeof Words === 'undefined' || !Words.ready) return src;
+  const parts = src.split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return src;
+  const out = [];
+  for (let i = 0; i < parts.length; i++) {
+    const w = parts[i];
+    const next = parts[i + 1];
+    if (next) {
+      const a = w.replace(/[^\p{L}]/gu, '');
+      const m = /^([\p{L}]+)([^\p{L}]*)$/u.exec(next);
+      const b = m ? m[1] : '';
+      const tail = m ? m[2] : '';
+      if (a && b && /^[А-Яа-яЁё]+$/.test(a) && /^[А-Яа-яЁё]+$/.test(b)) {
+        const cat = (a + b).toLowerCase();
+        const bKnown = Words.isKnown(b.toLowerCase());
+        const aLong = a.length >= 3;
+        if (Words.inDict(cat) && aLong && !bKnown) {
+          out.push(a + b + tail);
+          i++;
+          continue;
+        }
+      }
+    }
+    out.push(w);
+  }
+  return out.join(' ');
+}
+
+/**
+ * ПОСЛЕДНЯЯ ЧИСТКА РЕПЛИКИ — одна для всех движков.
+ *
+ * На телефоне распознавание идёт НАТИВНЫМ движком (ONNX в приложении), и строки
+ * приходят уже собранными в реплики — мимо починки, которая живёт в конвейере
+ * страницы. Поэтому на скриншотах 4.11 (v1.9.62) оставались «ПОДУМАЛАw»,
+ * «сапьYwb», «ЗНА4ИТ», «О ТЬ?», «СОБИРА ЮСЬ». Теперь одна и та же чистка
+ * применяется к репликам ЛЮБОГО движка, прямо перед словарём.
+ *
+ * Порядок важен: сперва снимаем латиницу, приклеенную к русскому слову (иначе
+ * «Ywb» превратится в «ушв», и мусор станет «словом»), потом добиваем двойников
+ * и цифры, потом делим слипшееся и склеиваем переносы, потом регистр.
+ */
+function polishLineText(raw) {
+  let text = String(raw || '').replace(/\u00AD/g, '-').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  text = text
+    .replace(/([А-Яа-яЁё]{2,})([A-Za-z]{1,4})(?![A-Za-zА-Яа-яЁё])/g, '$1')
+    .replace(/(^|[^A-Za-zА-Яа-яЁё])([A-Za-z]{1,4})([А-Яа-яЁё]{3,})/g, '$1$3');
+  text = cyrifyInsideWords(fixLookalikes(text));
+  text = splitGluedWords(text);
+  text = glueBrokenHalves(text);
+  text = glueSplitWords(text);
+  text = fixConfusedShortWords(text);
+  text = fixCaseInCaps(text);
+  return trimJunkEdges(text).trim();
 }
 
 /** Строка состоит ТОЛЬКО из символов-двойников: «OHO», «4YBC», «MHE TAK». */
