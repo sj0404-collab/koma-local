@@ -85,6 +85,7 @@ const body = [
   extractBlock('function spliceFragmentRuns('),
   extractBlock('function glueBrokenHalves(text)'),
   extractBlock('function restoreCutTails('),
+  extractBlock('function dropDuplicateReplicas('),
   extractBlock('function polishLineText(raw)'),
   extractBlock('function isLookalikeOnly(text, opts = {})'),
   extractBlock('function fixLookalikesForced(raw, opts = {})'),
@@ -97,7 +98,7 @@ const body = [
   extractBlock('function dropStuckFragments('),
   extractBlock('function median('),
   extractBlock('function glueSplitWords(text)'),
-  'module.exports = { polishLineText, mergeSplitTokens, spliceFragmentRuns, restoreCutTails, dropStuckFragments };',
+  'module.exports = { polishLineText, mergeSplitTokens, spliceFragmentRuns, restoreCutTails, dropStuckFragments, dropDuplicateReplicas };',
 ].join('\n');
 function extractLine(head) {
   const start = PART3.indexOf(head);
@@ -152,6 +153,17 @@ const TAIL_CASES = [
   ['АХ, НЕ ОТВЕТИЛА В LINE', ['ТЫ ВИДИШЬ МЕНЯ?'], 'АХ, НЕ ОТВЕТИЛА В LINE'],
   ['ОГО ПОХОЖЕ ВЫ ОЧЕНЬ ЗАНЯТА!', ['ого ПОХОЖЕ ТЫ ОЧЕНЬ ЗАНЯТА!'], 'ОГО ПОХОЖЕ ВЫ ОЧЕНЬ ЗАНЯТА!'],
 ];
+
+// Дубли реплик (телефон 19:58, страница 2).
+{
+  const src = [{text:'А ТО МЫ ТОЛЬКО ПОДРУЖИЛИСЬ.',top:.3},{text:'ПОДРУЖИЛИСЬ',top:.34},
+               {text:'СТОЙ!',top:.1},{text:'СТОЙ!',top:.5}];
+  const got = mod.exports.dropDuplicateReplicas(src).map(r=>r.text).join(' | ');
+  const want = 'А ТО МЫ ТОЛЬКО ПОДРУЖИЛИСЬ. | СТОЙ! | СТОЙ!';
+  const ok = got === want;
+  if (!ok) bad++;
+  console.log((ok ? '  ок  ' : '  БЕДА') + '  дубли: ' + got + (ok ? '' : '   ожидалось ' + want));
+}
 
 let bad = 0, mixed = 0;
 for (const [input, want] of CASES) {

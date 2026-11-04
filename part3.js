@@ -790,6 +790,38 @@ function dropStuckFragments(text) {
   return out.join(' ');
 }
 
+/**
+ * Выбросить реплику-огрызок, которая целиком входит в соседнюю (1.9.68).
+ *
+ * Телефон 19:58, страница 2: в списке стояли И «А ТО МЫ ТОЛЬКО ПОДРУЖИЛИСЬ.»,
+ * И отдельное «ПОДРУЖИЛИСЬ» — одно и то же облачко приехало дважды, потому что
+ * детектор дал два блока на одну реплику. Голос читал это два раза подряд.
+ * Правило: если текст реплики (только буквы) целиком входит в текст другой
+ * реплики и у неё не больше трёх слов — это огрызок, его не читаем.
+ */
+function dropDuplicateReplicas(replicas) {
+  const list = Array.isArray(replicas) ? replicas : [];
+  if (list.length < 2) return list;
+  const letters = (t) => String(t || '').toUpperCase().replace(/[^А-ЯЁA-Z]/g, '');
+  const key = list.map(r => letters(r && r.text));
+  const words = list.map(r => String((r && r.text) || '').trim().split(/\s+/).filter(Boolean).length);
+  const drop = new Set();
+  for (let i = 0; i < list.length; i++) {
+    const a = key[i];
+    if (a.length < 5) continue;
+    for (let j = 0; j < list.length; j++) {
+      if (i === j) continue;
+      const b = key[j];
+      if (b.length <= a.length) continue;
+      if (b.indexOf(a) < 0) continue;
+      if (words[i] > 3) continue;                 // длинную реплику не выбрасываем
+      drop.add(i);                                // огрызок короче и входит в соседнюю
+      break;
+    }
+  }
+  return list.filter((_, i) => !drop.has(i));
+}
+
 function polishLineText(raw) {
   let text = String(raw || '').replace(/\u00AD/g, '-').replace(/\s+/g, ' ').trim();
   if (!text) return '';

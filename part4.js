@@ -551,6 +551,9 @@ const Reader = {
           .map(r => ({ ...r, text: restoreCutTails(polishLineText(String(r.text || '')), rawTexts) }))
           .map(r => ({ ...r, text: Words.polish(r.text, RULES.junkRatio, r.confidence) }))
           .filter(l => l.text && (l.text.match(/\p{L}/gu) || []).length >= 2);
+        // Одно облачко, приехавшее дважды («А ТО МЫ ТОЛЬКО ПОДРУЖИЛИСЬ.» и
+        // «ПОДРУЖИЛИСЬ»), читалось вслух два раза подряд — телефон 19:58.
+        fresh = dropDuplicateReplicas(fresh);
         OCR.recovered = rec.attached;
         OCR.readPlan = 'native';
       } else {
