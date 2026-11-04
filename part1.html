@@ -78,27 +78,27 @@
   #strip .pagewrap{position:relative;margin:0 auto}
   #strip canvas,#strip img{display:block;width:100%;height:auto}
   #strip .frames{position:absolute;inset:0;pointer-events:none}
-  #strip .frame{position:absolute;border:1.5px solid var(--orange);border-radius:8px;pointer-events:auto}
-  #strip .frame.done{border-color:#ff8a4c33}
+  #strip .frame,#paged .frame{position:absolute;border:1.5px solid var(--orange);border-radius:8px;pointer-events:auto}
+  #strip .frame,#paged .frame.done{border-color:#ff8a4c33}
   /* Прочитанное в «Тексте страницы» — видно и помечено, но не спрятано */
   .lineitem .done{color:#8fd18f}
-  #strip .frame.cur{background:#ff8a4c33;border-width:2.5px;border-color:var(--orange)}
-  #strip .frame.spk::after{content:"🔊";position:absolute;right:-4px;top:-22px;font-size:15px}
+  #strip .frame,#paged .frame.cur{background:#ff8a4c33;border-width:2.5px;border-color:var(--orange)}
+  #strip .frame,#paged .frame.spk::after{content:"🔊";position:absolute;right:-4px;top:-22px;font-size:15px}
   /* Крупный текст (титул, каллиграфия) — другим цветом, чтобы не путать с репликой */
-  #strip .frame.large{border-color:#6fa8ff;border-style:dashed}
-  #strip .frame.large.cur{background:#6fa8ff26;border-color:#6fa8ff}
+  #strip .frame,#paged .frame.large{border-color:#6fa8ff;border-style:dashed}
+  #strip .frame,#paged .frame.large.cur{background:#6fa8ff26;border-color:#6fa8ff}
   /* Текст из Google Lens приходит БЕЗ координат: рамки делят страницу на равные
      полосы по порядку реплик. Поэтому они пунктирные и с номером — чтобы было
      видно, что это «строка №3 сверху», а не точное место на картинке. */
   /* Место реплики найдено локальным детектором, текст — из Lens: сплошная
      сиреневая рамка, чтобы отличать от «примерно» (пунктир). */
-  #strip .frame.lensbox{border-color:#8a7be0}
-  #strip .frame.lensbox.cur{background:#6c5ce733;border-color:#a99cff;border-width:2.5px}
-  #strip .frame.lensbox.done{border-color:#8a7be055}
-  #strip .frame.approx{border-style:dashed;border-color:#8a7be0a0}
-  #strip .frame.approx.cur{background:#6c5ce733;border-color:#a99cff;border-width:2.5px}
-  #strip .frame.approx.done{border-color:#8a7be055}
-  #strip .frame .fnum{position:absolute;left:1px;top:-13px;font-size:9px;line-height:11px;
+  #strip .frame,#paged .frame.lensbox{border-color:#8a7be0}
+  #strip .frame,#paged .frame.lensbox.cur{background:#6c5ce733;border-color:#a99cff;border-width:2.5px}
+  #strip .frame,#paged .frame.lensbox.done{border-color:#8a7be055}
+  #strip .frame,#paged .frame.approx{border-style:dashed;border-color:#8a7be0a0}
+  #strip .frame,#paged .frame.approx.cur{background:#6c5ce733;border-color:#a99cff;border-width:2.5px}
+  #strip .frame,#paged .frame.approx.done{border-color:#8a7be055}
+  #strip .frame,#paged .frame .fnum{position:absolute;left:1px;top:-13px;font-size:9px;line-height:11px;
     color:#fff;background:#6c5ce7cc;border-radius:4px;padding:0 3px;font-weight:600}
   .lineitem.large{color:#9dc0ff}
   .lineitem.large b{color:#6fa8ff}
@@ -107,7 +107,12 @@
   #paged.on{display:block}
   #paged .pagebox{position:absolute;inset:0;overflow:auto;display:none}
   #paged .pagebox.on{display:block}
-  #paged .pagebox .inner{position:relative;transform-origin:0 0}
+  #paged .pagebox .inner{position:relative;transform-origin:0 0;margin:0 auto}
+  /* Постраничный режим раньше не имел ни размеров картинки, ни слоя рамок:
+     страница открывалась «чёрным экраном», а распознанный текст было не на чем
+     показать. Теперь страница ложится по ширине экрана, рамки — как в ленте. */
+  #paged .pagebox .inner img{display:block;width:100%;height:auto}
+  #paged .frames{position:absolute;inset:0;pointer-events:none}
   .bottombar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:6px;
     padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:#232822ee;backdrop-filter:blur(6px);
     z-index:25;transition:transform .2s}

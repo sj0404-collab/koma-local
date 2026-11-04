@@ -96,11 +96,18 @@ const Reader = {
       for (let i = 0; i < this.pages.length; i++) {
         const box = document.createElement('div');
         box.className = 'pagebox'; box.dataset.page = i;
-        box.innerHTML = '<div class="inner"><img alt="Страница ' + (i + 1) + '"></div>';
+        // Класс .on делал только turnPage(), то есть после переключения режима
+        // на «Страницы» не была видна НИ ОДНА страница — чёрный экран с
+        // панелью «5 / 8» (живой прогон 04.11, жалоба 127). Текущую страницу
+        // показываем сразу.
+        box.classList.toggle('on', i === this.page);
+        box.innerHTML = '<div class="inner"><img alt="Страница ' + (i + 1) + '">'
+          + '<div class="frames" data-frames="' + i + '"></div></div>';
         paged.appendChild(box);
         this.imgEls[i] = box.querySelector('img');
         this.imgEls[i].onload = () => this.onPageSized(i);
       }
+      this.ensureLoaded(this.page);
     }
     // грузим страницы лениво: сначала текущую и соседние
     for (const i of this.loadOrder()) this.ensureLoaded(i);
@@ -150,9 +157,11 @@ const Reader = {
   },
 
   paintPage(i) {
+    // Слой рамок есть в обоих режимах: в ленте — на обёртке страницы, в
+    // постраничном — внутри .pagebox.
     const framesEl = this.mode === 'vertical'
-      ? document.querySelector(`[data-frames="${i}"]`)
-      : null;
+      ? document.querySelector(`#strip [data-frames="${i}"]`)
+      : document.querySelector(`#paged [data-frames="${i}"]`);
     if (!framesEl) return;
     framesEl.innerHTML = '';
     if (!this.frames) return;

@@ -774,6 +774,15 @@ function bindUI() {
   $('#cbFollow').onchange = (e) => { Reader.follow = e.target.checked; };
   $('#reader').addEventListener('click', (e) => {
     if (e.target.closest('.frame') || e.target.closest('button') || e.target.closest('.bottombar')) return;
+    // Постраничный режим: листать можно пальцем — левая половина назад,
+    // правая вперёд (для манги справа налево — наоборот). Раньше страницы
+    // листались ТОЛЬКО стрелками клавиатуры, которых на телефоне нет.
+    if (Reader.mode !== 'vertical' && e.target.tagName === 'IMG') {
+      const right = e.clientX > window.innerWidth / 2;
+      const forward = (Reader.dir === 'rtl') ? !right : right;
+      turnPage(forward ? 1 : -1);
+      return;
+    }
     if (e.target.tagName === 'IMG') {
       $('#readerBar').classList.toggle('hide');
       $('#readerHeader').style.transform =
