@@ -44,6 +44,22 @@ echo "проверки: ок"
 cat $PARTS_LITE > koma-lite.html
 LZ=$(stat -c%s koma-lite.html)
 echo "лёгкая сборка (без WASM): $LZ Б"
+
+# ── Страховка от «удалил функцию и не заметил» ──────────────────────────────
+# 5.11: при правке part3.js я снёс 15 функций разом (срез кода съел блок), и на
+# телефоне это вылезло как «Ошибка распознавания: restoreCutTails is not defined».
+# Теперь сборка не пройдёт, если хоть одна из рабочих функций пропала.
+missing=""
+for fn in restoreCutTails polishLineText repairWordsByDict dropStuckFragments \
+          mergeSplitTokens spliceFragmentRuns glueBrokenHalves glueSplitWords \
+          dropDuplicateReplicas trimJunkEdges fixPhrases isTitleOrMarker \
+          looksLikeJunkLine dropLetterNameTail readingOrder recognizePage \
+          dictNearest splitGluedWords fixLookalikes cyrifyInsideWords; do
+  grep -q "function $fn(" koma-web.html || missing="$missing $fn"
+done
+if [ -n "$missing" ]; then echo "ПРОПАЛИ ФУНКЦИИ:$missing"; exit 1; fi
+echo "все рабочие функции на месте"
+
 if ! grep -q "VERSION = 'v" koma-lite.html; then echo "ЛЁГКАЯ СБОРКА БИТАЯ"; exit 1; fi
 cp koma-lite.html apk/app/src/main/assets/koma-web.html
 

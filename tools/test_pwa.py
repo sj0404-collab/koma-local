@@ -45,6 +45,20 @@ def main():
             pg.wait_for_function('typeof OCR !== "undefined" && typeof recognizePage === "function"', timeout=60000)
             log('страница PWA открылась, скрипт читалки на месте')
 
+            # 0) все рабочие функции на месте (иначе будет «X is not defined»)
+            names = pg.evaluate("""() => {
+              const want = ['restoreCutTails','polishLineText','repairWordsByDict','dropStuckFragments',
+                'mergeSplitTokens','spliceFragmentRuns','glueBrokenHalves','glueSplitWords',
+                'dropDuplicateReplicas','trimJunkEdges','fixPhrases','isTitleOrMarker',
+                'looksLikeJunkLine','dropLetterNameTail','readingOrder','recognizePage',
+                'dictNearest','splitGluedWords','fixLookalikes','cyrifyInsideWords','recoverLostLines'];
+              return want.filter(n => { try { return eval('typeof ' + n) !== 'function'; } catch (e) { return true; } });
+            }""")
+            if names:
+                log('ПРОВАЛ: нет функций:', ', '.join(names))
+            else:
+                log('все рабочие функции на месте (21 шт.)')
+
             # 1) service worker
             pg.wait_for_timeout(2500)
             sw = pg.evaluate("""async () => {
