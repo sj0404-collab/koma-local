@@ -1776,7 +1776,7 @@ const Words = {
     // Плашка приложения и счётчик прогресса — не реплика (см. isServiceText).
     if (this.isServiceText(raw)) return '';
     if (!this.ready) return this.finish(raw);
-    const thr = junkRatio ?? 0.6;
+    const thr = (junkRatio === undefined || junkRatio === null) ? 0.6 : junkRatio;
     // {2,} а не {3,}: «Тг. чв» — тоже не реплика, а короткие настоящие слова
     // («не», «да», «ты», «он») в словаре есть и проверку проходят.
     // Латинская мелочь — это не реплика, а номер страницы или логотип:
@@ -2613,7 +2613,7 @@ async function decodeCrop(cropCanvas, sess) {
     let best = 0, bestV = values[base];
     for (let ci = 1; ci < C; ci++) { const v = values[base + ci]; if (v > bestV) { bestV = v; best = ci; } }
     if (best !== 0 && best !== prev) {
-      text += OCR.dict[best] ?? '';
+      text += (OCR.dict[best] || '');
       score += bestV; count++;
     }
     prev = best;
@@ -2749,7 +2749,9 @@ function beamDecode(res, opts) {
   const { T, C, p } = res;
   const o = opts || {};
   const BEAM = o.beam || 10, TOPK = o.topk || 8;
-  const BONUS = o.bonus ?? 1.2, PEN = o.pen ?? 0.7, WORD_W = o.wordW ?? 1.6;
+  const BONUS = o.bonus == null ? 1.2 : o.bonus;
+  const PEN = o.pen == null ? 0.7 : o.pen;
+  const WORD_W = o.wordW == null ? 1.6 : o.wordW;
   const dict = OCR.dict, words = decoderWords();
   const LN = (x) => (x > 1e-9 ? Math.log(x) : -20.72);
   const topC = new Int32Array(TOPK + 1), topV = new Float32Array(TOPK + 1);
@@ -2792,7 +2794,7 @@ function beamDecode(res, opts) {
       for (let k = 0; k < n; k++) {
         const c = topC[k];
         if (c === 0) continue;
-        const ch = dict[c] ?? '';
+        const ch = dict[c] || '';
         if (!ch) continue;
         let bonus;
         if (ch === ' ') {
@@ -3214,7 +3216,7 @@ async function decodeAllVariants(crop, R, first) {
   // «Умно»: не больше maxVariants подготовок на строку. Замер 27.10 на 45
   // строках: побеждал «orig» в 43 случаях, «pad20» и «up2» делили остаток —
   // дальше (contrast, pad20up2, bin0) выигрывали редко, а стоили столько же.
-  const cap = (R.autoDepth === true) ? Math.max(1, Math.round(R.maxVariants ?? 3)) : tries.length;
+  const cap = (R.autoDepth === true) ? Math.max(1, Math.round(R.maxVariants == null ? 3 : R.maxVariants)) : tries.length;
   let best = null;
   for (const [name, cv] of tries.slice(0, cap)) {
     let text = '', conf = 0;
@@ -3261,13 +3263,13 @@ async function decodeBetter(cropCanvas, R, opts = {}) {
     const ws = (String(first[0]).match(/[А-Яа-яЁё]{2,}/g) || []).map(w => w.toLowerCase());
     if (ws.length < 3) return false;                 // звук или обрывок
     const bad = ws.filter(w => !Words.isKnown(w)).length;
-    return bad / ws.length >= (R.autoDepthMin ?? 0.34);
+    return bad / ws.length >= (R.autoDepthMin == null ? 0.34 : R.autoDepthMin);
   };
   if (R.decodeVariants !== false && (opts.wide || letters(first[0]) >= 3) && worthVariants()) {
     const best = await decodeAllVariants(cropCanvas, R, first);
     return [best.text, best.conf];
   }
-  const need = Math.max(0, Math.round(R.decodeRetryBelow ?? 1));
+  const need = Math.max(0, Math.round(R.decodeRetryBelow == null ? 1 : R.decodeRetryBelow));
   let out = first;
   const rankT = (t) => {
     const st = lineStat(t);
@@ -3746,7 +3748,7 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
         const ws = (t.match(/[А-Яа-яЁё]{2,}/g) || []).map(x => x.toLowerCase());
         if (ws.length < 3) return false;                 // звук или обрывок
         const bad = ws.filter(x => !Words.isKnown(x)).length;
-        return bad / ws.length >= (R.autoDepthMin ?? 0.34);
+        return bad / ws.length >= (R.autoDepthMin == null ? 0.34 : R.autoDepthMin);
       };
       // autoDepth=false — прежнее поведение: перебираем варианты, пока не
       // соберём все словарные слова. autoDepth=true — экономим вызовы модели
@@ -3863,7 +3865,7 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     const letters = lettersOf(firstTexts);
     const hard = letters >= 8 && knownShare(firstTexts) < 0.5;
     const big = pageMedian > 0 && h > pageMedian * 1.8;
-    if (boxW < (R.largeMinWidth ?? 0.22) || !(hard || big)) continue;
+    if (boxW < (R.largeMinWidth == null ? 0.22 : R.largeMinWidth) || !(hard || big)) continue;
     largePasses++;
     const alt = await recognizeLargeBox(src, entry.box, R, { visible, y0, pageH: imgCanvas.height, W });
     crops += alt.crops;
@@ -4383,7 +4385,8 @@ function bubblesOf(group, rtl, R) {
       const t = String(part.text || '').trim();
       if (!t) return;
       if (index > 0 && text) {
-        const prev = ordered[index - 1]?.text?.trim() || '';
+        const prevRow = ordered[index - 1];
+        const prev = (prevRow && prevRow.text ? prevRow.text.trim() : '') || '';
         const last = text[text.length - 1];
         if (last === '-' || last === '\u00AD') text = text.slice(0, -1);
         else if (joinBrokenWord(text, t)) text = text.replace(/[.\-]$/, '');   // «БУДЕ.» + «ТЕ» → «БУДЕТЕ»

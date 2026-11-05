@@ -379,6 +379,60 @@
 </head>
 <body>
 
+<script>
+/* ── Пробник (ES5, без единого современного знака) ───────────────────────────
+   Пять раз на телефоне было «Скрипты страницы не выполнились», и каждый раз
+   причина была разная: то запрещённое хранилище, то старый WebView, который не
+   разбирает ?. и ??. Этот кусок — единственный скрипт, который обязан пережить
+   любой браузер: он ничего не требует, ловит ошибки и через 3 секунды, если
+   приложение так и не поднялось, пишет НАСТОЯЩУЮ причину прямо в надпись. */
+(function () {
+  var probe = { started: true, errors: [] };
+  window.__komaProbe = probe;
+  try {
+    window.addEventListener('error', function (e) {
+      try {
+        var t = e && (e.message || (e.error && e.error.message));
+        if (t) probe.errors.push(t + (e.lineno ? ' (строка ' + e.lineno + ')' : ''));
+      } catch (x) {}
+    }, true);
+  } catch (x) {}
+  var modern = true;
+  try { new Function('var a={b:1}; return (a && a.b) + 1;'); } catch (x) { modern = false; }
+  try { new Function('var a={b:1}; return a?.b ?? 2;'); } catch (x) { modern = false; }
+  probe.modern = modern;
+  // Признак жизни: Library объявлен через const на верхнем уровне — это НЕ
+  // свойство window, поэтому проверять надо простым typeof, а не window.Library
+  // (на этом пробник один раз соврал: приложение работало, а надпись появлялась).
+  function alive() {
+    try { if (window.__komaBoot) return true; } catch (x) {}
+    try { return (typeof Library !== 'undefined'); } catch (x) { return false; }
+  }
+  var ticks = 0;
+  var timer = window.setInterval(function () {
+    ticks++;
+    if (alive()) { window.clearInterval(timer); return; }
+    if (!probe.errors.length && ticks < 20) return;   // до 10 секунд ждём молча
+    window.clearInterval(timer);
+    if (alive()) return;
+    var sc = document.getElementById('selfCheck');
+    if (!sc) return;
+    var ua = (navigator && navigator.userAgent) ? navigator.userAgent : 'браузер не назвался';
+    var msg;
+    if (!modern) {
+      msg = 'Браузер не понимает современный синтаксис (?. и ??): это Chrome/WebView старше 80. '
+        + 'Обновите Chrome (или Android System WebView) и откройте страницу снова.';
+    } else if (probe.errors.length) {
+      msg = 'Скрипты не выполнились: ' + probe.errors.slice(0, 2).join('; ');
+    } else {
+      msg = 'Скрипты страницы не выполнились (браузер их не запустил). Браузер: ' + ua.slice(0, 110);
+    }
+    sc.textContent = msg;
+    sc.style.display = 'block';
+  }, 500);
+})();
+</script>
+
 <!-- ═══ Библиотека ═══ -->
 <section id="library" class="screen on">
   <header class="libhead">

@@ -15,7 +15,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.80';
+const VERSION = 'v1.9.81';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -368,7 +368,10 @@ const Library = {
       await DB.put('pages', { key, id, index: i, name, blob });
       pages.push({ key, name });
     }
-    const cover = pages.length ? (await DB.get('pages', pages[0].key))?.blob : null;
+    const coverRow = pages.length ? await DB.get('pages', pages[0].key) : null;
+    // Без ?. — старые WebView (Chrome < 80) не разбирают такой синтаксис вообще,
+    // и тогда не выполняется ни один скрипт страницы.
+    const cover = coverRow ? coverRow.blob : null;
     const sibs = this.chaptersOf(seriesId);
     // Естественный порядок (как в Yomikai): «Глава 10» идёт после «Глава 2»,
     // поэтому номер берём из названия, а не из порядка добавления.
@@ -638,7 +641,7 @@ function renderLibrary() {
   $$('#libChips .chip').forEach(c => {
     const f = c.dataset.filter || 'all';
     const num = c.querySelector('.num');
-    if (num) num.textContent = String(counts[f] ?? 0);
+    if (num) num.textContent = String(counts[f] === undefined ? 0 : counts[f]);
     c.classList.toggle('on', f === (Library.filter || 'all'));
   });
 

@@ -400,7 +400,9 @@ function bindUI() {
   $('#btnRulesImport').onclick = () => {
     const inp = rulesInput;
     inp.onchange = async () => {
-      const f = inp.files?.[0]; inp.value = '';
+      const list = inp.files;
+      const f = list && list[0];
+      inp.value = '';
       if (!f) return;
       try {
         RULES = sanitizeRules(JSON.parse(await f.text()));
@@ -475,7 +477,7 @@ function bindUI() {
   // показать. Сканируем ту страницу, чей текст открыт (Reader.textPage), а не
   // «текущую в ленте» — из-за этого раньше реплики не перезаписывались вовсе.
   $('#btnRescan').onclick = async () => {
-    const i = (Reader.textPage ?? Reader.page);
+    const i = (Reader.textPage == null ? Reader.page : Reader.textPage);
     $('#btnRescan').disabled = true;
     try {
       await Reader.scanPage(i, { force: true, keepSheet: true });
@@ -522,7 +524,7 @@ function bindUI() {
 
   $('#btnSpeakPage').onclick = async () => {
     TTS.prime();                        // «Прочитать» в шторке — тот же жест
-    const i = (Reader.textPage ?? Reader.page);
+    const i = (Reader.textPage == null ? Reader.page : Reader.textPage);
     await Reader.scanPage(i, { keepSheet: false });
     closeSheets();
     // Человек нажал сам — читаем с начала того, что на экране, а не с того
@@ -1021,7 +1023,7 @@ window.addEventListener('unhandledrejection', (e) => {
 });
 
 const ENV = {
-  sandboxed: (() => { try { return window.self !== window.top; } catch { return true; } })(),
+  sandboxed: (() => { try { return window.self !== window.top; } catch (e) { return true; } })(),
   android: /Android/i.test(navigator.userAgent),
 };
 
@@ -1052,6 +1054,17 @@ async function selfCheck() {
     : VOICE.kind() + ', голосов ' + vc;
   parts.push('голос: ' + (VOICE && VOICE.available() ? voiceLine : 'нет синтеза'));
   if (ENV.android) parts.push('Android: папки нет, выбирайте файлы/CBZ');
+  // Браузер и поддержка синтаксиса — чтобы по скриншоту ⚙ было видно, на чём
+  // именно не поднялось (старый WebView, предпросмотр, приватный режим).
+  try {
+    const probe = window.__komaProbe || {};
+    const ua = navigator.userAgent;
+    const name = /Chrome\/(\d+)/.test(ua) ? 'Chrome ' + RegExp.$1
+      : /Firefox\/(\d+)/.test(ua) ? 'Firefox ' + RegExp.$1
+      : /YaBrowser/.test(ua) ? 'Yandex'
+      : /Safari/.test(ua) ? 'Safari' : 'браузер';
+    parts.push('браузер: ' + name + (probe.modern === false ? ', без ?. и ??' : ''));
+  } catch (e) {}
   // Строка состояния — единственное место, где видно правду о загрузке.
   // Если что-то не поднялось, пишем это здесь, а не оставляем на экране
   // «Скрипты страницы не выполнились» (эта надпись — только для случая, когда
@@ -1085,6 +1098,9 @@ async function selfCheck() {
   // выполнились» — хотя кнопки при этом работали. Теперь падение одного шага
   // не мешает остальным, а его причина честно пишется в строку состояния.
   State.bootErrors = State.bootErrors || [];
+  // Флаг для аварийного пробника в начале страницы: приложение действительно
+  // пошло. Без него он не может отличить «скрипты не выполнились» от «работает».
+  try { window.__komaBoot = VERSION; } catch (e) {}
   // Надпись «Скрипты страницы не выполнились» — аварийная, для случая, когда не
   // выполнился НИ ОДИН скрипт. Как только boot начался, она врёт: меняем на
   // «Загрузка», а итог пишет selfCheck в конце.

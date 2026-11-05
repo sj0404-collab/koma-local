@@ -52,7 +52,8 @@ const Reader = {
     this.regions.clear();
     // Что уже прочитано — из базы: после остановки и даже перезапуска чтение
     // продолжается с первого непрочитанного места, а не с начала страницы.
-    this.spoken = new Set((await DB.get('kv', 'spoken:' + book.id))?.v || []);
+    const spokenRow = await DB.get('kv', 'spoken:' + book.id);
+    this.spoken = new Set((spokenRow && spokenRow.v) || []);
     // Уже распознанные страницы берём из буфера: повторное открытие книги и
     // повторное чтение не должны снова стоить 10 секунд на страницу.
     let cleaned = 0;
@@ -160,7 +161,8 @@ const Reader = {
     if (!img || img.dataset.src) return;
     img.dataset.src = '1';
     const row = this.pages[i];
-    const blob = (await DB.get('pages', row.key))?.blob;
+    const pageRec = await DB.get('pages', row.key);
+    const blob = pageRec ? pageRec.blob : null;
     if (!blob) return;
     const url = URL.createObjectURL(blob);
     this.urls[i] = url;
@@ -636,7 +638,11 @@ const Reader = {
       const largePasses = res.largePasses || 0;
       this.bandCache.set(i, bandMap);
       const parts = Array.from(bandMap.entries())
-        .sort((a, b) => (a[1].res.band?.y0 ?? 0) - (b[1].res.band?.y0 ?? 0));
+        .sort((a, b) => {
+          const ya = a[1].res.band ? a[1].res.band.y0 : 0;
+          const yb = b[1].res.band ? b[1].res.band.y0 : 0;
+          return ya - yb;
+        });
       const lines = mergeBandLines(parts.map(([, part]) => part), c);
       const total = parts.reduce((acc, [, p]) => acc + (p.res.ms || 0), 0);
       this.regions.set(i, {
@@ -1015,7 +1021,8 @@ const Buffer = {
     await DB.put('kv', { k: key, v: { page, book: Reader.book.id, at: Date.now(), rules: RULES.version, build, lines } });
   },
   async get(page) {
-    return (await DB.get('kv', 'buf:' + Reader.book.id + ':' + page))?.v || null;
+    const bufRow = await DB.get('kv', 'buf:' + Reader.book.id + ':' + page);
+    return (bufRow && bufRow.v) || null;
   },
   /**
    * Ключ книги в буфере — С ДВОЕТОЧИЕМ на конце.
@@ -2908,7 +2915,7 @@ function turnPage(dir) {
   const next = clamp(Reader.page + dir, 0, Reader.pages.length - 1);
   if (Reader.mode === 'vertical') {
     const wrap = document.querySelector(`.pagewrap[data-page="${next}"]`);
-    wrap?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (wrap) wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
   } else {
     document.querySelectorAll('.pagebox').forEach(b => b.classList.toggle('on', +b.dataset.page === next));
     Reader.page = next; Reader.syncSub(); Reader.ensureLoaded(next); Reader.afterPageReady(); Reader.saveProgress();
