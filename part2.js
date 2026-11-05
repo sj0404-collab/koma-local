@@ -15,7 +15,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.77';
+const VERSION = 'v1.9.78';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -268,6 +268,12 @@ const Plugins = {
 /* ───────────────────────── 3. Библиотека ───────────────────────── */
 const Library = {
   books: [],
+  // Состояние полки (1.0.29): фильтр, поиск, сортировка, вид.
+  filter: 'all',        // all | reading | new | done
+  query: '',            // поиск по названию
+  sort: 'recent',       // recent | old | title | left
+  view: 'grid',         // grid | list
+  selectedId: '',
   async load() {
     this.books = (await DB.all('books') || []).sort((a, b) => (b.at || 0) - (a.at || 0));
     renderLibrary();
@@ -337,76 +343,330 @@ function mimeOf(name) {
  *    а появляется после первой попытки и подтверждается вторым нажатием.
  */
 Library.filter = 'all';
+/* ───────────────────────── Полка библиотеки (1.0.29) ────────────────────────
+   Переписана как отдельный слой, чтобы дальше добавлять по одной вещи, не
+   трогая читалку. Здесь: поиск по названию, четыре фильтра со счётчиками,
+   сортировка, два вида (обложки и список), карточка «продолжить чтение»
+   и меню книги (открыть · переименовать · читать с начала · удалить).
+   Состояние живёт в Library, поэтому переживает перерисовку.                 */
+
+/** Ссылки на обложки: создаём один раз на книгу и освобождаем при удалении. */
+const LIB_COVERS = new Map();
+function libCoverUrl(book) {
+  if (!book || !book.cover) return '';
+  if (LIB_COVERS.has(book.id)) return LIB_COVERS.get(book.id);
+  let url = '';
+  try { url = URL.createObjectURL(book.cover); } catch (e) { url = ''; }
+  LIB_COVERS.set(book.id, url);
+  return url;
+}
+function libCoverDrop(bookId) {
+  const url = LIB_COVERS.get(bookId);
+  if (url) { try { URL.revokeObjectURL(url); } catch (e) {} LIB_COVERS.delete(bookId); }
+}
+
+/** В каком состоянии глава: не начата · читаю · закончена. */
+function libState(book) {
+  const count = Number(book.count) || 0;
+  const prog = clamp(Number(book.progress) || 0, 0, Math.max(0, count - 1));
+  if (count > 0 && prog >= count - 1) return 'done';
+  return prog > 0 ? 'reading' : 'new';
+}
+function libKindName(book) {
+  if (book.mode === 'vertical') return 'лента';
+  if (book.mode === 'rtl') return 'манга · справа налево';
+  return 'страницы · слева направо';
+}
+function libAgo(at) {
+  if (!at) return '';
+  const d = new Date(Number(at));
+  const now = new Date();
+  const day = 24 * 3600 * 1000;
+  const a = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const b = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diff = Math.round((b - a) / day);
+  if (diff <= 0) return 'сегодня';
+  if (diff === 1) return 'вчера';
+  if (diff < 7) return diff + ' дн. назад';
+  return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+}
+function libPlace(book) {
+  const count = Number(book.count) || 0;
+  const prog = clamp(Number(book.progress) || 0, 0, Math.max(0, count - 1));
+  if (libState(book) === 'done') return 'дочитано';
+  return prog > 0 ? `стр. ${prog + 1} из ${count}` : `${count} стр. · не начато`;
+}
+function libPercent(book) {
+  const count = Number(book.count) || 0;
+  const prog = clamp(Number(book.progress) || 0, 0, Math.max(0, count - 1));
+  if (!count) return 0;
+  if (count === 1) return prog ? 100 : 0;
+  return Math.round(prog / (count - 1) * 100);
+}
+
+/** Список под текущий фильтр, поиск и сортировку. */
 function libFiltered() {
   const f = Library.filter || 'all';
-  return Library.books.filter(b => {
-    const prog = Number(b.progress) || 0;
-    if (f === 'reading') return prog > 0;
-    if (f === 'new') return !prog;
-    return true;
-  });
+  const q = String(Library.query || '').trim().toLowerCase();
+  let list = Library.books.slice();
+  if (f !== 'all') list = list.filter(b => libState(b) === f);
+  if (q) {
+    list = list.filter(b => String(b.title || '').toLowerCase().includes(q));
+  }
+  const sort = Library.sort || 'recent';
+  const cmp = {
+    recent: (a, b) => (Number(b.at) || 0) - (Number(a.at) || 0),
+    old: (a, b) => (Number(a.at) || 0) - (Number(b.at) || 0),
+    title: (a, b) => String(a.title || '').localeCompare(String(b.title || ''), 'ru'),
+    left: (a, b) => {
+      const ra = (Number(a.count) || 0) - (Number(a.progress) || 0);
+      const rb = (Number(b.count) || 0) - (Number(b.progress) || 0);
+      return rb - ra;
+    },
+  }[sort] || ((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0));
+  return list.sort(cmp);
 }
+
+/** Книга, которую логично предложить продолжить: последняя открытая, не дочитанная. */
+function libContinueBook() {
+  const list = Library.books
+    .filter(b => libState(b) === 'reading')
+    .sort((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0));
+  return list[0] || null;
+}
+
+function renderLibraryHero() {
+  const box = $('#libHero');
+  if (!box) return;
+  const b = libContinueBook();
+  if (!b) { box.classList.remove('on'); box.innerHTML = ''; return; }
+  const url = libCoverUrl(b);
+  box.classList.add('on', 'fade');
+  box.innerHTML = (url ? `<img src="${url}" alt="">` : '<div class="nofoto">НЕТ ОБЛОЖКИ</div>')
+    + `<div class="txt">
+         <div class="kicker">Продолжить чтение</div>
+         <div class="name">${escapeHtml(b.title)}</div>
+         <div class="meta">${libPlace(b)} · ${libKindName(b)}</div>
+       </div>
+       <button class="go" title="Продолжить">▶</button>`;
+  const open = () => { libCoverSelect(b); openBook(b); };
+  box.querySelector('.go').onclick = open;
+  box.querySelector('.txt').onclick = open;
+}
+
+function libCoverSelect(book) { Library.selectedId = book.id; }
+
 function renderLibrary() {
-  const grid = $('#libGrid');
-  const sub = $('#libSub');
   const all = Library.books;
   const list = libFiltered();
+  const sub = $('#libSub');
+  const totalPages = all.reduce((s, b) => s + (Number(b.count) || 0), 0);
+
   if (sub) {
     sub.textContent = all.length
-      ? `${all.length} ${all.length === 1 ? 'глава' : (all.length < 5 ? 'главы' : 'глав')} · локальные файлы, без сети`
+      ? `${all.length} ${all.length === 1 ? 'глава' : (all.length < 5 ? 'главы' : 'глав')} · ${totalPages} стр. · без сети`
       : 'локальные файлы · ничего не уходит в сеть';
   }
-  $('#libEmpty').style.display = all.length ? 'none' : 'block';
-  document.querySelectorAll('#libChips .chip').forEach(c => {
-    c.classList.toggle('on', (c.dataset.filter || 'all') === (Library.filter || 'all'));
+
+  // счётчики фильтров
+  const counts = { all: all.length, reading: 0, new: 0, done: 0 };
+  for (const b of all) counts[libState(b)]++;
+  $$('#libChips .chip').forEach(c => {
+    const f = c.dataset.filter || 'all';
+    const num = c.querySelector('.num');
+    if (num) num.textContent = String(counts[f] ?? 0);
+    c.classList.toggle('on', f === (Library.filter || 'all'));
   });
-  grid.innerHTML = '';
+
+  // сортировка и вид
+  const sortSel = $('#libSort');
+  if (sortSel) sortSel.value = Library.sort || 'recent';
+  const viewBtn = $('#btnLibView');
+  if (viewBtn) viewBtn.textContent = (Library.view === 'list') ? 'Список' : 'Обложки';
+  const grid = $('#libGrid');
+  const rows = $('#libList');
+  if (grid) grid.style.display = (Library.view === 'list') ? 'none' : '';
+  if (rows) rows.style.display = (Library.view === 'list') ? 'flex' : 'none';
+
+  renderLibraryHero();
+
+  const empty = $('#libEmpty');
+  if (empty) empty.style.display = all.length ? 'none' : 'block';
+
+  if (grid) grid.innerHTML = '';
+  if (rows) rows.innerHTML = '';
+
   if (all.length && !list.length) {
-    grid.innerHTML = '<div class="empty" style="grid-column:1/-1">Под этот фильтр глав нет.<br>'
-      + 'Нажмите «Все».</div>';
+    const msg = (Library.query ? 'По запросу «' + escapeHtml(Library.query) + '» ничего нет.' : 'Под этот фильтр глав нет.')
+      + '<br>Сбросьте фильтр или поиск.';
+    if (Library.view === 'list' && rows) rows.innerHTML = `<div class="empty" style="padding:26px 10px">${msg}</div>`;
+    else if (grid) grid.innerHTML = `<div class="empty" style="grid-column:1/-1;padding:26px 10px">${msg}</div>`;
     return;
   }
+
   for (const b of list) {
-    const el = document.createElement('div');
-    el.className = 'card';
-    el.dataset.armed = '0';
-    const url = b.cover ? URL.createObjectURL(b.cover) : '';
-    const count = Number(b.count) || 0;
-    const prog = Math.max(0, Math.min(count, Number(b.progress) || 0));
-    const pct = count > 1 ? Math.round(prog / (count - 1) * 100) : (prog ? 100 : 0);
-    const where = prog > 0 ? `стр. ${prog + 1} из ${count}` : 'не начато';
-    el.innerHTML = `${url ? `<img src="${url}" alt="">` : '<div class="nofoto">НЕТ ОБЛОЖКИ</div>'}
-      <button class="del">✕</button>
-      <div class="cap">${escapeHtml(b.title)}<span>${where} · ${b.mode === 'vertical' ? 'лента' : b.mode === 'rtl' ? 'справа налево' : 'слева направо'}</span></div>
-      <div class="bar"><i style="width:${pct}%"></i></div>`;
-    // confirm() в предпросмотре и части мобильных браузеров глушится, поэтому
-    // спрашиваем вторым нажатием, а не модалкой.
-    el.querySelector('.del').onclick = async (e) => {
-      e.stopPropagation();
-      if (el.dataset.armed !== '1') {
-        el.dataset.armed = '1';
-        el.classList.add('armed');
-        el.querySelector('.del').textContent = '?';
-        toast('Нажмите ✕ ещё раз, чтобы удалить «' + b.title + '»');
-        setTimeout(() => {
-          if (el.dataset.armed === '1') {
-            el.dataset.armed = '0'; el.classList.remove('armed');
-            el.querySelector('.del').textContent = '✕';
-          }
-        }, 3000);
-        return;
-      }
-      await Library.remove(b.id); await Library.load();
-      toast('Удалено');
-    };
-    el.onclick = () => openBook(b);
-    grid.appendChild(el);
+    if (Library.view === 'list') rows.appendChild(libRow(b));
+    else grid.appendChild(libCard(b));
   }
 }
+
+/** Карточка-обложка. */
+function libCard(b) {
+  const el = document.createElement('div');
+  el.className = 'card fade' + (libState(b) === 'done' ? ' done' : '');
+  el.dataset.id = b.id;
+  const url = libCoverUrl(b);
+  const pct = libPercent(b);
+  const st = libState(b);
+  el.innerHTML = `
+    <div class="shot">
+      ${url ? `<img src="${url}" alt="" loading="lazy">` : '<div class="nofoto">НЕТ ОБЛОЖКИ</div>'}
+      <div class="flag">${st === 'done' ? 'дочитано' : b.mode === 'vertical' ? 'лента' : 'страницы'}</div>
+      <button class="more" title="Меню книги">⋯</button>
+      <div class="bar"><i style="width:${pct}%"></i></div>
+    </div>
+    <div class="cap">${escapeHtml(b.title)}</div>
+    <div class="cap2"><span>${libPlace(b)}</span>${b.at ? `<span>·</span><span>${libAgo(b.at)}</span>` : ''}</div>`;
+  el.onclick = (e) => {
+    if (e.target.closest('.more')) { openLibMenu(b); return; }
+    openBook(b);
+  };
+  let timer = null;
+  el.addEventListener('touchstart', () => {
+    timer = setTimeout(() => { timer = null; openLibMenu(b); }, 480);
+  }, { passive: true });
+  el.addEventListener('touchend', () => { if (timer) { clearTimeout(timer); timer = null; } });
+  el.addEventListener('touchmove', () => { if (timer) { clearTimeout(timer); timer = null; } }, { passive: true });
+  return el;
+}
+
+/** Строка списка. */
+function libRow(b) {
+  const el = document.createElement('div');
+  el.className = 'row-card fade';
+  el.dataset.id = b.id;
+  const url = libCoverUrl(b);
+  const pct = libPercent(b);
+  el.innerHTML = `
+    ${url ? `<img src="${url}" alt="" loading="lazy">` : '<div class="nofoto">НЕТ</div>'}
+    <div class="txt">
+      <div class="name">${escapeHtml(b.title)}</div>
+      <div class="meta">${libPlace(b)} · ${libKindName(b)}${b.at ? ' · ' + libAgo(b.at) : ''}</div>
+      <div class="mini"><i style="width:${pct}%"></i></div>
+    </div>
+    <button class="more" title="Меню книги">⋯</button>`;
+  el.onclick = (e) => {
+    if (e.target.closest('.more')) { openLibMenu(b); return; }
+    openBook(b);
+  };
+  return el;
+}
+
+/* ── меню книги ── */
+let LIB_MENU_BOOK = null;
+let libDeleteArmed = false;
+function openLibMenu(book) {
+  LIB_MENU_BOOK = book;
+  libDeleteArmed = false;
+  const t = $('#libMenuTitle');
+  if (t) t.textContent = book.title || 'Книга';
+  const del = $('#libMenuDelete');
+  if (del) { del.textContent = 'Удалить главу'; del.classList.add('warn'); }
+  const st = libState(book);
+  const open = $('#libMenuOpen');
+  if (open) open.textContent = st === 'reading' ? 'Продолжить' : st === 'done' ? 'Открыть' : 'Начать читать';
+  openSheet('libMenu');
+}
+function bindLibMenu() {
+  const close = () => { closeSheets('libMenu'); };
+  if ($('#libMenuClose')) $('#libMenuClose').onclick = close;
+  if ($('#libMenuOpen')) $('#libMenuOpen').onclick = async () => {
+    const b = LIB_MENU_BOOK; close(); if (b) await openBook(b);
+  };
+  if ($('#libMenuStart')) $('#libMenuStart').onclick = async () => {
+    const b = LIB_MENU_BOOK; close();
+    if (!b) return;
+    b.progress = 0;
+    await DB.put('books', b);
+    await Library.load();
+    await openBook(b);
+  };
+  if ($('#libMenuRename')) $('#libMenuRename').onclick = () => {
+    const b = LIB_MENU_BOOK; close();
+    if (!b) return;
+    openLibRename(b);
+  };
+  if ($('#libMenuDelete')) $('#libMenuDelete').onclick = async (e) => {
+    const b = LIB_MENU_BOOK;
+    if (!b) return;
+    // confirm() в песочнице и части мобильных браузеров глушится — спрашиваем
+    // вторым нажатием на ту же кнопку.
+    if (!libDeleteArmed) {
+      libDeleteArmed = true;
+      e.currentTarget.textContent = 'Точно удалить «' + (b.title || '').slice(0, 18) + '»?';
+      return;
+    }
+    close();
+    libCoverDrop(b.id);
+    await Library.remove(b.id);
+    await Library.load();
+    toast('Глава удалена');
+  };
+}
+
+/* ── переименование ── */
+let LIB_RENAME_BOOK = null;
+function openLibRename(book) {
+  LIB_RENAME_BOOK = book;
+  const inp = $('#libRenameInput');
+  if (inp) inp.value = book.title || '';
+  openSheet('libRename');
+  setTimeout(() => { if (inp) { inp.focus(); inp.select(); } }, 120);
+}
+function bindLibRename() {
+  const save = async () => {
+    const b = LIB_RENAME_BOOK;
+    const inp = $('#libRenameInput');
+    const name = String((inp && inp.value) || '').trim();
+    closeSheets('libRename');
+    if (!b || !name || name === b.title) return;
+    b.title = name;
+    b.at = b.at || Date.now();
+    await DB.put('books', b);
+    await Library.load();
+    toast('Название сохранено');
+  };
+  if ($('#libRenameSave')) $('#libRenameSave').onclick = save;
+  if ($('#libRenameCancel')) $('#libRenameCancel').onclick = () => closeSheets('libRename');
+  if ($('#libRenameInput')) $('#libRenameInput').onkeydown = (e) => { if (e.key === 'Enter') save(); };
+}
+
+/* ── поиск, сортировка, вид ── */
 function bindLibChips() {
-  document.querySelectorAll('#libChips .chip').forEach(c => {
+  $$('#libChips .chip').forEach(c => {
     c.onclick = () => { Library.filter = c.dataset.filter || 'all'; renderLibrary(); };
   });
+  const bar = $('#libSearchBar');
+  const inp = $('#libSearch');
+  if ($('#btnLibSearch')) $('#btnLibSearch').onclick = () => {
+    const on = bar && bar.classList.toggle('on');
+    if (on && inp) setTimeout(() => inp.focus(), 60);
+    if (!on && inp) { inp.value = ''; Library.query = ''; renderLibrary(); }
+  };
+  if ($('#btnLibSearchClose')) $('#btnLibSearchClose').onclick = () => {
+    if (bar) bar.classList.remove('on');
+    if (inp) inp.value = '';
+    Library.query = '';
+    renderLibrary();
+  };
+  if (inp) inp.oninput = () => { Library.query = inp.value; renderLibrary(); };
+  if ($('#libSort')) $('#libSort').onchange = (e) => { Library.sort = e.target.value; renderLibrary(); };
+  if ($('#btnLibView')) $('#btnLibView').onclick = () => {
+    Library.view = Library.view === 'list' ? 'grid' : 'list';
+    renderLibrary();
+  };
+  bindLibMenu();
+  bindLibRename();
 }
 /**
  * Открыть книгу. Раньше карточка звала openBook(), а такой функции не было
