@@ -4,6 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>KOMA Web · локальная библиотека и читалка</title>
+<!-- PWA (1.0.27): та же страница, установленная на главный экран. В АПК эти
+     теги безвредны: манифеста там нет, регистрация service worker'а не пройдёт
+     по протоколу file:// и молча отвалится. -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0d0f13">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
 <style>
   /* Палитра 1.9.69: по образцу библиотеки Yomukai — почти чёрный фон, панели
      на два тона светлее, индиго как единственный акцент и тонкие линии вместо

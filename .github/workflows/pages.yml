@@ -1,0 +1,54 @@
+name: PWA в GitHub Pages
+
+# Собирает ту же страницу, что и АПК, но полную (с WASM), кладёт рядом манифест,
+# service worker, иконки и модели — и публикует на GitHub Pages. Оттуда PWA
+# ставится на главный экран телефона и работает без сети.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'apk/**'
+      - 'README.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Собрать страницу и PWA
+        run: bash build.sh
+      - name: Проверить, что PWA собралась целиком
+        run: |
+          set -e
+          for f in pwa/index.html pwa/manifest.webmanifest pwa/sw.js \
+                   pwa/icons/icon-192.png pwa/icons/icon-512.png \
+                   pwa/models/det.onnx pwa/models/rec.onnx pwa/models/charset.txt; do
+            test -s "$f" || { echo "НЕТ $f"; exit 1; }
+          done
+          du -sh pwa
+          grep -q "KOMA" pwa/manifest.webmanifest
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: pwa
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

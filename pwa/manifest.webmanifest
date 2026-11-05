@@ -1,0 +1,17 @@
+{
+  "name": "KOMA — читалка с голосом",
+  "short_name": "KOMA",
+  "description": "Локальная библиотека, распознавание текста на странице и чтение вслух. Работает без сети.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0d0f13",
+  "theme_color": "#0d0f13",
+  "lang": "ru",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
