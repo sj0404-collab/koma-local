@@ -1190,7 +1190,11 @@ async function selfCheck() {
 // Та же страница ставится на главный экран и работает без сети: service worker
 // держит в кеше саму страницу и модели. Регистрация нужна только по http(s):
 // в АПК страница лежит в file:// и service worker там невозможен — молча выходим.
-if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+// В песочнице (sandbox="allow-scripts" без allow-same-origin) даже чтение
+// navigator.serviceWorker бросает SecurityError — и человек видел «Ошибка: …».
+// Поэтому весь блок под try/catch: нет офлайн-кеша — просто идём дальше.
+if (/^https?:$/.test(location.protocol)) try {
+  if ('serviceWorker' in navigator) {
   // Регистрируем сразу, а не по событию load: скрипт стоит в конце документа,
   // к этому моменту DOM готов, а ждать load на 11-МБ странице — терять секунды.
   navigator.serviceWorker.register('sw.js', { scope: './' }).then(reg => {
@@ -1198,7 +1202,8 @@ if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
     // версия всплывает только после перезапуска.
     setInterval(() => reg.update().catch(() => {}), 3600 * 1000);
   }).catch(e => console.warn('service worker не зарегистрировался', e));
-}
+  }
+} catch (e) { console.warn('service worker недоступен в этой среде', e); }
 })();
 </script>
 </body>
