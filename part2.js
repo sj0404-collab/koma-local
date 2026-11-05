@@ -15,7 +15,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.78';
+const VERSION = 'v1.9.79';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -267,24 +267,132 @@ const Plugins = {
 
 /* ───────────────────────── 3. Библиотека ───────────────────────── */
 const Library = {
-  books: [],
-  // Состояние полки (1.0.29): фильтр, поиск, сортировка, вид.
+  books: [],            // главы
+  series: [],           // серии (полка показывает их, как в Yomikai)
+  cat: 'all',           // выбранная полка
   filter: 'all',        // all | reading | new | done
-  query: '',            // поиск по названию
+  query: '',
   sort: 'recent',       // recent | old | title | left
-  view: 'grid',         // grid | list
+  view: 'grid',
   selectedId: '',
+
   async load() {
-    this.books = (await DB.all('books') || []).sort((a, b) => (b.at || 0) - (a.at || 0));
+    const rows = (await DB.all('books') || []);
+    this.series = rows.filter(r => r && r.type === 'series');
+    this.books = rows.filter(r => !r || r.type !== 'series');
+    await this.migrate();
+    this.series.sort((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0));
+    this.books.sort((a, b) => (Number(a.index) || 0) - (Number(b.index) || 0));
     renderLibrary();
+    if (typeof renderHistory === 'function') renderHistory();
   },
+
   /**
-   * Добавить страницы в СУЩЕСТВУЮЩУЮ главу.
+   * Переезд со старой полки на «серии → главы» (1.0.30).
    *
-   * Зачем: в браузере на Android нельзя выбрать папку (SAF вебу недоступен), а
-   * файловый выбор за один раз редко даёт все 20 страниц. Так можно добавлять
-   * по частям — в ту же книгу, с продолжением нумерации.
+   * До этого каждая глава лежала отдельной книгой, и полка выглядела как свалка
+   * из «Том 1 Глава 1», «Том 1 Глава 2»… В Yomikai полка — это серии, а главы
+   * внутри. Ничего не теряем: старые записи становятся главами, а серия
+   * заводится по названию («Том 2 Глава 3» → серия «Том 2»).
    */
+  async migrate() {
+    const known = new Map(this.series.map(s => [String(s.title || '').toLowerCase(), s]));
+    let touched = 0;
+    for (const ch of this.books) {
+      if (!ch) continue;
+      let dirty = false;
+      if (ch.type !== 'chapter') { ch.type = 'chapter'; dirty = true; }
+      if (!ch.seriesId) {
+        const name = seriesTitleOf(ch.title || 'Глава');
+        let s = known.get(name.toLowerCase());
+        if (!s) {
+          s = {
+            id: 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+            type: 'series', title: name, category: 'Без полки',
+            cover: ch.cover || null, at: Number(ch.at) || Date.now(), kind: ch.kind || 'files',
+          };
+          this.series.push(s);
+          known.set(name.toLowerCase(), s);
+          await DB.put('books', s);
+        }
+        ch.seriesId = s.id;
+        ch.index = Number.isFinite(ch.index) ? ch.index : (this.chaptersOf(s.id).length + 1);
+        dirty = true;
+        if (!s.cover && ch.cover) { s.cover = ch.cover; await DB.put('books', s); }
+      }
+      if (dirty) { await DB.put('books', ch); touched++; }
+    }
+    // серии без глав убираем: иначе на полке висят пустые карточки
+    for (const s of this.series.slice()) {
+      if (!this.chaptersOf(s.id).length && !this.books.some(b => b.seriesId === s.id)) {
+        this.series = this.series.filter(x => x.id !== s.id);
+        await DB.del('books', s.id);
+      }
+    }
+    return touched;
+  },
+
+  chaptersOf(seriesId) {
+    return this.books
+      .filter(b => b.seriesId === seriesId)
+      .sort((a, b) => (Number(a.index) || 0) - (Number(b.index) || 0));
+  },
+  seriesOf(chapter) {
+    return this.series.find(s => s.id === (chapter && chapter.seriesId)) || null;
+  },
+  cats() {
+    const set = new Set(this.series.map(s => s.category || 'Без полки'));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'ru', { numeric: true }));
+  },
+
+  async addSeries(title, category) {
+    const s = {
+      id: 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      type: 'series', title: title || 'Без названия', category: category || 'Без полки',
+      cover: null, at: Date.now(), kind: 'files',
+    };
+    await DB.put('books', s);
+    // Держим в памяти сразу: иначе обложка из первой главы не долетит до серии
+    // (серия только что создана и в this.series её ещё нет — телефон 5.11).
+    this.series.push(s);
+    return s;
+  },
+  async addChapter(seriesId, title, files, kind) {
+    const id = 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const pages = [];
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      const name = String(f.name || ('page-' + i)).split('/').pop();
+      const blob = f.blob || new Blob([f.data], { type: mimeOf(name) });
+      const key = id + '/' + i;
+      await DB.put('pages', { key, id, index: i, name, blob });
+      pages.push({ key, name });
+    }
+    const cover = pages.length ? (await DB.get('pages', pages[0].key))?.blob : null;
+    const sibs = this.chaptersOf(seriesId);
+    // Естественный порядок (как в Yomikai): «Глава 10» идёт после «Глава 2»,
+    // поэтому номер берём из названия, а не из порядка добавления.
+    const parsed = chapterNumberOf(title);
+    const chapter = {
+      id, type: 'chapter', seriesId, title: title || ('Глава ' + (sibs.length + 1)),
+      index: parsed != null ? parsed : sibs.length + 1, kind: kind || 'files', count: pages.length,
+      at: Date.now(), progress: 0, mode: 'vertical', cover,
+    };
+    await DB.put('books', chapter);
+    const s = this.series.find(x => x.id === seriesId) || (await DB.get('books', seriesId));
+    if (s) {
+      let dirty = false;
+      if (!s.cover && cover) { s.cover = cover; dirty = true; }
+      s.at = Date.now(); dirty = true;
+      if (dirty) await DB.put('books', s);
+    }
+    return chapter;
+  },
+  /** Совместимость со старым импортом: одна глава = новая серия. */
+  async addBook(title, files, kind) {
+    const s = await this.addSeries(seriesTitleOf(title || 'Глава'));
+    return this.addChapter(s.id, title || 'Глава 1', files, kind);
+  },
   async appendTo(bookId, files) {
     const book = await DB.get('books', bookId);
     if (!book) throw new Error('глава не найдена');
@@ -299,83 +407,123 @@ const Library = {
     await DB.put('books', book);
     return book;
   },
-  async addBook(title, files, kind) {
-    const id = 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    const pages = [];
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      const name = f.name.split('/').pop();
-      const blob = f.blob || new Blob([f.data], { type: mimeOf(name) });
-      const key = id + '/' + i;
-      await DB.put('pages', { key, id, index: i, name, blob });
-      pages.push({ key, name });
-    }
-    const cover = pages.length ? (await DB.get('pages', pages[0].key))?.blob : null;
-    const book = { id, title, kind, count: pages.length, at: Date.now(), progress: 0, mode: 'vertical', cover };
-    await DB.put('books', book);
-    return book;
-  },
   async pages(bookId) {
     const rows = (await DB.all('pages') || []).filter(p => p.id === bookId);
     rows.sort((a, b) => a.index - b.index);
     return rows;
   },
+  /** Удалить главу (и её страницы). */
   async remove(bookId) {
     const rows = (await DB.all('pages') || []).filter(p => p.id === bookId);
     for (const p of rows) await DB.del('pages', p.key);
     await DB.del('books', bookId);
   },
+  /** Удалить серию целиком. */
+  /** Отметить главу открытой: отсюда берётся история. */
+  async touch(chapter) {
+    if (!chapter) return;
+    const now = Date.now();
+    chapter.opened = now;
+    chapter.at = now;
+    try { await DB.put('books', chapter); } catch (e) {}
+    const s = this.series.find(x => x.id === chapter.seriesId);
+    if (s) { s.at = now; try { await DB.put('books', s); } catch (e) {} }
+  },
+  async removeSeries(seriesId) {
+    for (const ch of this.chaptersOf(seriesId)) await this.remove(ch.id);
+    await DB.del('books', seriesId);
+  },
 };
+
+/** Русские склонения: plural(3, ['глава','главы','глав']) → «главы». */
+function plural(n, forms) {
+  const a = Math.abs(Number(n) || 0) % 100;
+  const b = a % 10;
+  if (a > 10 && a < 20) return forms[2];
+  if (b > 1 && b < 5) return forms[1];
+  if (b === 1) return forms[0];
+  return forms[2];
+}
+
+/** Номер главы из названия: «Глава 10» → 10, «ch. 3» → 3, «Том 2 Глава 4» → 4. */
+function chapterNumberOf(title) {
+  const t = String(title || '');
+  const m = t.match(/(?:глава|гл\.|chapter|chap\.|ch\.|эпизод|episode)\s*[№#]?\s*(\d+(?:\.\d+)?)/i)
+    || t.match(/\b(\d+(?:\.\d+)?)\b/);
+  return m ? parseFloat(m[1]) : null;
+}
+
+/** «Том 2 Глава 3» → «Том 2»; «Глава 7» → «Без названия»; иначе — как есть. */
+function seriesTitleOf(title) {
+  let t = String(title || '').trim();
+  if (!t) return 'Без названия';
+  t = t.replace(/[·—–-]?\s*(глава|гл\.?|chapter|chap\.?|эпизод|episode)\s*[№#]?\s*\d+.*$/i, '').trim();
+  t = t.replace(/[\s·—–-]+$/, '').trim();
+  if (!t || /^(том|vol\.?|volume)\s*[№#]?\s*\d+$/i.test(t)) return t || 'Без названия';
+  return t || 'Без названия';
+}
+
+/* ───────────────────────── Полка (как в Yomikai) ───────────────────────────
+   Полка показывает СЕРИИ. Внутри серии — главы (шторка «Главы»). Сверху полки:
+   свои полки-категории, под ними — состояние (читаю / не начато / закончено),
+   справа — сортировка и вид. Снизу — три вкладки: Библиотека · История · Ещё.  */
+
 function mimeOf(name) {
   const e = name.split('.').pop().toLowerCase();
   return e === 'png' ? 'image/png' : e === 'webp' ? 'image/webp' : e === 'gif' ? 'image/gif' : 'image/jpeg';
 }
 
-/**
- * Полка библиотеки (1.9.69, по образцу Yomukai).
- *
- * Что изменилось по существу, а не только по виду:
- *  · фильтр «Все / Читаю / Не начато» — раньше с десятком глав нельзя было
- *    понять, что уже открывали;
- *  · полоска прогресса на обложке — видно, где остановился;
- *  · подпись под обложкой, а не поверх: заголовок больше не закрывает рисунок;
- *  · кнопка удаления не висит поверх каждой обложки (случайные нажатия),
- *    а появляется после первой попытки и подтверждается вторым нажатием.
- */
-Library.filter = 'all';
-/* ───────────────────────── Полка библиотеки (1.0.29) ────────────────────────
-   Переписана как отдельный слой, чтобы дальше добавлять по одной вещи, не
-   трогая читалку. Здесь: поиск по названию, четыре фильтра со счётчиками,
-   сортировка, два вида (обложки и список), карточка «продолжить чтение»
-   и меню книги (открыть · переименовать · читать с начала · удалить).
-   Состояние живёт в Library, поэтому переживает перерисовку.                 */
-
-/** Ссылки на обложки: создаём один раз на книгу и освобождаем при удалении. */
 const LIB_COVERS = new Map();
 function libCoverUrl(book) {
-  if (!book || !book.cover) return '';
-  if (LIB_COVERS.has(book.id)) return LIB_COVERS.get(book.id);
+  const key = book && (book.id || book.seriesId);
+  const blob = book && (book.cover || null);
+  if (!key || !blob) return '';
+  if (LIB_COVERS.has(key)) return LIB_COVERS.get(key);
   let url = '';
-  try { url = URL.createObjectURL(book.cover); } catch (e) { url = ''; }
-  LIB_COVERS.set(book.id, url);
+  try { url = URL.createObjectURL(blob); } catch (e) { url = ''; }
+  LIB_COVERS.set(key, url);
   return url;
 }
-function libCoverDrop(bookId) {
-  const url = LIB_COVERS.get(bookId);
-  if (url) { try { URL.revokeObjectURL(url); } catch (e) {} LIB_COVERS.delete(bookId); }
+function libCoverDrop(id) {
+  const url = LIB_COVERS.get(id);
+  if (url) { try { URL.revokeObjectURL(url); } catch (e) {} LIB_COVERS.delete(id); }
 }
 
-/** В каком состоянии глава: не начата · читаю · закончена. */
-function libState(book) {
-  const count = Number(book.count) || 0;
-  const prog = clamp(Number(book.progress) || 0, 0, Math.max(0, count - 1));
-  if (count > 0 && prog >= count - 1) return 'done';
-  return prog > 0 ? 'reading' : 'new';
+function chapState(ch) {
+  const count = Number(ch.count) || 0;
+  const prog = clamp(Number(ch.progress) || 0, 0, Math.max(0, count - 1));
+  const opened = Number(ch.opened) > 0;
+  // Глава из одной страницы: «дочитано» только если её действительно открывали.
+  // Иначе только что добавленная глава сразу числилась бы прочитанной.
+  if (count > 1 && prog >= count - 1) return 'done';
+  if (count === 1 && opened) return 'done';
+  return (prog > 0 || opened) ? 'reading' : 'new';
 }
-function libKindName(book) {
-  if (book.mode === 'vertical') return 'лента';
-  if (book.mode === 'rtl') return 'манга · справа налево';
-  return 'страницы · слева направо';
+function seriesState(s) {
+  const chs = Library.chaptersOf(s.id);
+  if (!chs.length) return 'new';
+  const states = chs.map(chapState);
+  if (states.every(x => x === 'done')) return 'done';
+  if (states.some(x => x !== 'new')) return 'reading';
+  return 'new';
+}
+function seriesUnread(s) {
+  return Library.chaptersOf(s.id).filter(c => chapState(c) === 'new').length;
+}
+function seriesPercent(s) {
+  const chs = Library.chaptersOf(s.id);
+  if (!chs.length) return 0;
+  const pages = chs.reduce((a, c) => a + (Number(c.count) || 0), 0) || 1;
+  const read = chs.reduce((a, c) => a + clamp(Number(c.progress) || 0, 0, Number(c.count) || 0), 0);
+  return Math.round(read / pages * 100);
+}
+function chapPlace(ch) {
+  const count = Number(ch.count) || 0;
+  const prog = clamp(Number(ch.progress) || 0, 0, Math.max(0, count - 1));
+  const st = chapState(ch);
+  if (st === 'done') return 'дочитано';
+  if (st === 'reading') return `стр. ${prog + 1} из ${count}`;
+  return `${count} ${plural(count, ['страница', 'страницы', 'страниц'])} · не начато`;
 }
 function libAgo(at) {
   if (!at) return '';
@@ -390,87 +538,103 @@ function libAgo(at) {
   if (diff < 7) return diff + ' дн. назад';
   return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
 }
-function libPlace(book) {
-  const count = Number(book.count) || 0;
-  const prog = clamp(Number(book.progress) || 0, 0, Math.max(0, count - 1));
-  if (libState(book) === 'done') return 'дочитано';
-  return prog > 0 ? `стр. ${prog + 1} из ${count}` : `${count} стр. · не начато`;
-}
-function libPercent(book) {
-  const count = Number(book.count) || 0;
-  const prog = clamp(Number(book.progress) || 0, 0, Math.max(0, count - 1));
-  if (!count) return 0;
-  if (count === 1) return prog ? 100 : 0;
-  return Math.round(prog / (count - 1) * 100);
+function libKindName(ch) {
+  if (ch.mode === 'vertical') return 'лента';
+  if (ch.mode === 'rtl') return 'манга';
+  return 'страницы';
 }
 
-/** Список под текущий фильтр, поиск и сортировку. */
-function libFiltered() {
-  const f = Library.filter || 'all';
+/** Какая глава логична для «продолжить»: недоконченная, иначе первая не начатая. */
+function seriesNext(s) {
+  const chs = Library.chaptersOf(s.id);
+  const reading = chs.filter(c => chapState(c) === 'reading')
+    .sort((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0));
+  if (reading.length) return reading[0];
+  const fresh = chs.find(c => chapState(c) === 'new');
+  return fresh || chs[chs.length - 1] || null;
+}
+
+function libSeriesList() {
+  const cat = Library.cat || 'all';
   const q = String(Library.query || '').trim().toLowerCase();
-  let list = Library.books.slice();
-  if (f !== 'all') list = list.filter(b => libState(b) === f);
-  if (q) {
-    list = list.filter(b => String(b.title || '').toLowerCase().includes(q));
-  }
+  let list = Library.series.slice();
+  if (cat === 'fav') list = list.filter(s => !!s.fav);
+  else if (cat !== 'all') list = list.filter(s => (s.category || 'Без полки') === cat);
+  const f = Library.filter || 'all';
+  if (f !== 'all') list = list.filter(s => seriesState(s) === f);
+  if (q) list = list.filter(s => String(s.title || '').toLowerCase().includes(q));
   const sort = Library.sort || 'recent';
   const cmp = {
     recent: (a, b) => (Number(b.at) || 0) - (Number(a.at) || 0),
     old: (a, b) => (Number(a.at) || 0) - (Number(b.at) || 0),
-    title: (a, b) => String(a.title || '').localeCompare(String(b.title || ''), 'ru'),
-    left: (a, b) => {
-      const ra = (Number(a.count) || 0) - (Number(a.progress) || 0);
-      const rb = (Number(b.count) || 0) - (Number(b.progress) || 0);
-      return rb - ra;
-    },
+    title: (a, b) => String(a.title || '').localeCompare(String(b.title || ''), 'ru', { numeric: true }),
+    left: (a, b) => seriesUnread(b) - seriesUnread(a),
   }[sort] || ((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0));
   return list.sort(cmp);
 }
 
-/** Книга, которую логично предложить продолжить: последняя открытая, не дочитанная. */
-function libContinueBook() {
-  const list = Library.books
-    .filter(b => libState(b) === 'reading')
+function libContinueChapter() {
+  const chs = Library.books.filter(c => chapState(c) === 'reading')
     .sort((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0));
-  return list[0] || null;
+  return chs[0] || null;
 }
 
 function renderLibraryHero() {
   const box = $('#libHero');
   if (!box) return;
-  const b = libContinueBook();
-  if (!b) { box.classList.remove('on'); box.innerHTML = ''; return; }
-  const url = libCoverUrl(b);
+  const ch = libContinueChapter();
+  if (!ch) { box.classList.remove('on'); box.innerHTML = ''; return; }
+  const s = Library.seriesOf(ch);
+  const url = libCoverUrl(s || ch);
   box.classList.add('on', 'fade');
   box.innerHTML = (url ? `<img src="${url}" alt="">` : '<div class="nofoto">НЕТ ОБЛОЖКИ</div>')
     + `<div class="txt">
          <div class="kicker">Продолжить чтение</div>
-         <div class="name">${escapeHtml(b.title)}</div>
-         <div class="meta">${libPlace(b)} · ${libKindName(b)}</div>
+         <div class="name">${escapeHtml(s ? s.title : ch.title)}</div>
+         <div class="meta">${escapeHtml(ch.title)} · ${chapPlace(ch)} · ${libKindName(ch)}</div>
        </div>
        <button class="go" title="Продолжить">▶</button>`;
-  const open = () => { libCoverSelect(b); openBook(b); };
+  const open = () => openBook(ch);
   box.querySelector('.go').onclick = open;
   box.querySelector('.txt').onclick = open;
 }
 
-function libCoverSelect(book) { Library.selectedId = book.id; }
-
 function renderLibrary() {
-  const all = Library.books;
-  const list = libFiltered();
+  const allSeries = Library.series;
+  const list = libSeriesList();
   const sub = $('#libSub');
-  const totalPages = all.reduce((s, b) => s + (Number(b.count) || 0), 0);
+  const chapters = Library.books.length;
+  const pages = Library.books.reduce((a, c) => a + (Number(c.count) || 0), 0);
 
   if (sub) {
-    sub.textContent = all.length
-      ? `${all.length} ${all.length === 1 ? 'глава' : (all.length < 5 ? 'главы' : 'глав')} · ${totalPages} стр. · без сети`
+    sub.textContent = allSeries.length
+      ? `${allSeries.length} ${plural(allSeries.length, ['серия', 'серии', 'серий'])}`
+        + ` · ${chapters} ${plural(chapters, ['глава', 'главы', 'глав'])} · ${pages} ${plural(pages, ['страница', 'страницы', 'страниц'])}`
       : 'локальные файлы · ничего не уходит в сеть';
   }
 
-  // счётчики фильтров
-  const counts = { all: all.length, reading: 0, new: 0, done: 0 };
-  for (const b of all) counts[libState(b)]++;
+  // полки
+  const catsBox = $('#libCats');
+  if (catsBox) {
+    const cats = Library.cats();
+    const favCount = allSeries.filter(s => s.fav).length;
+    const items = [{ name: 'all', label: 'Все полки', n: allSeries.length },
+      { name: 'fav', label: '★ Избранное', n: favCount }]
+      .concat(cats.map(c => ({
+        name: c, label: c,
+        n: allSeries.filter(s => (s.category || 'Без полки') === c).length,
+      })));
+    catsBox.innerHTML = items.map(it =>
+      `<button data-cat="${escapeHtml(it.name)}" class="${(Library.cat || 'all') === it.name ? 'on' : ''}">`
+      + `${escapeHtml(it.label)}<b>${it.n}</b></button>`).join('');
+    catsBox.querySelectorAll('button').forEach(b => {
+      b.onclick = () => { Library.cat = b.dataset.cat; renderLibrary(); };
+    });
+  }
+
+  // состояния
+  const counts = { all: allSeries.length, reading: 0, new: 0, done: 0 };
+  for (const s of allSeries) counts[seriesState(s)]++;
   $$('#libChips .chip').forEach(c => {
     const f = c.dataset.filter || 'all';
     const num = c.querySelector('.num');
@@ -478,7 +642,6 @@ function renderLibrary() {
     c.classList.toggle('on', f === (Library.filter || 'all'));
   });
 
-  // сортировка и вид
   const sortSel = $('#libSort');
   if (sortSel) sortSel.value = Library.sort || 'recent';
   const viewBtn = $('#btnLibView');
@@ -491,157 +654,267 @@ function renderLibrary() {
   renderLibraryHero();
 
   const empty = $('#libEmpty');
-  if (empty) empty.style.display = all.length ? 'none' : 'block';
-
+  if (empty) empty.style.display = allSeries.length ? 'none' : 'block';
   if (grid) grid.innerHTML = '';
   if (rows) rows.innerHTML = '';
 
-  if (all.length && !list.length) {
-    const msg = (Library.query ? 'По запросу «' + escapeHtml(Library.query) + '» ничего нет.' : 'Под этот фильтр глав нет.')
-      + '<br>Сбросьте фильтр или поиск.';
+  if (allSeries.length && !list.length) {
+    const msg = (Library.query ? 'По запросу «' + escapeHtml(Library.query) + '» ничего нет.'
+      : 'В этой полке и фильтре ничего нет.') + '<br>Сбросьте фильтр, полку или поиск.';
     if (Library.view === 'list' && rows) rows.innerHTML = `<div class="empty" style="padding:26px 10px">${msg}</div>`;
     else if (grid) grid.innerHTML = `<div class="empty" style="grid-column:1/-1;padding:26px 10px">${msg}</div>`;
     return;
   }
 
-  for (const b of list) {
-    if (Library.view === 'list') rows.appendChild(libRow(b));
-    else grid.appendChild(libCard(b));
+  for (const s of list) {
+    if (Library.view === 'list') rows.appendChild(libSeriesRow(s));
+    else grid.appendChild(libSeriesCard(s));
   }
 }
 
-/** Карточка-обложка. */
-function libCard(b) {
+function libSeriesCard(s) {
   const el = document.createElement('div');
-  el.className = 'card fade' + (libState(b) === 'done' ? ' done' : '');
-  el.dataset.id = b.id;
-  const url = libCoverUrl(b);
-  const pct = libPercent(b);
-  const st = libState(b);
+  el.className = 'card fade' + (seriesState(s) === 'done' ? ' done' : '');
+  el.dataset.id = s.id;
+  const url = libCoverUrl(s);
+  const pct = seriesPercent(s);
+  const chs = Library.chaptersOf(s.id).length;
+  const unread = seriesUnread(s);
+  const st = seriesState(s);
   el.innerHTML = `
     <div class="shot">
-      ${url ? `<img src="${url}" alt="" loading="lazy">` : '<div class="nofoto">НЕТ ОБЛОЖКИ</div>'}
-      <div class="flag">${st === 'done' ? 'дочитано' : b.mode === 'vertical' ? 'лента' : 'страницы'}</div>
-      <button class="more" title="Меню книги">⋯</button>
+      ${url ? `<img src="${url}" alt="" loading="lazy" onerror="this.remove()">` : '<div class="nofoto">НЕТ ОБЛОЖКИ</div>'}
+      <div class="flag">${s.fav ? '★ ' : ''}${st === 'done' ? 'дочитано' : unread ? `${unread} новых` : 'читаю'}</div>
+      <button class="more" title="Меню серии">⋯</button>
       <div class="bar"><i style="width:${pct}%"></i></div>
     </div>
-    <div class="cap">${escapeHtml(b.title)}</div>
-    <div class="cap2"><span>${libPlace(b)}</span>${b.at ? `<span>·</span><span>${libAgo(b.at)}</span>` : ''}</div>`;
+    <div class="cap">${escapeHtml(s.title)}</div>
+    <div class="cap2"><span>${chs} ${plural(chs, ['глава', 'главы', 'глав'])}</span>`
+    + `<span>·</span><span>${s.at ? libAgo(s.at) : ''}</span></div>`;
   el.onclick = (e) => {
-    if (e.target.closest('.more')) { openLibMenu(b); return; }
-    openBook(b);
+    if (e.target.closest('.more')) { openSeriesMenu(s); return; }
+    openChapters(s);
   };
-  let timer = null;
-  el.addEventListener('touchstart', () => {
-    timer = setTimeout(() => { timer = null; openLibMenu(b); }, 480);
-  }, { passive: true });
-  el.addEventListener('touchend', () => { if (timer) { clearTimeout(timer); timer = null; } });
-  el.addEventListener('touchmove', () => { if (timer) { clearTimeout(timer); timer = null; } }, { passive: true });
+  libLongPress(el, () => openSeriesMenu(s));
   return el;
 }
 
-/** Строка списка. */
-function libRow(b) {
+function libSeriesRow(s) {
   const el = document.createElement('div');
   el.className = 'row-card fade';
-  el.dataset.id = b.id;
-  const url = libCoverUrl(b);
-  const pct = libPercent(b);
+  el.dataset.id = s.id;
+  const url = libCoverUrl(s);
+  const pct = seriesPercent(s);
+  const chs = Library.chaptersOf(s.id);
+  const next = seriesNext(s);
+  const unread = seriesUnread(s);
   el.innerHTML = `
     ${url ? `<img src="${url}" alt="" loading="lazy">` : '<div class="nofoto">НЕТ</div>'}
     <div class="txt">
-      <div class="name">${escapeHtml(b.title)}</div>
-      <div class="meta">${libPlace(b)} · ${libKindName(b)}${b.at ? ' · ' + libAgo(b.at) : ''}</div>
+      <div class="name">${escapeHtml(s.title)}</div>
+      <div class="meta">${chs.length} ${plural(chs.length, ['глава', 'главы', 'глав'])}${unread
+        ? ` · ${unread} не начато`
+        : (next ? ' · ' + chapPlace(next) : '')}</div>
       <div class="mini"><i style="width:${pct}%"></i></div>
     </div>
-    <button class="more" title="Меню книги">⋯</button>`;
+    <button class="more" title="Меню серии">⋯</button>`;
   el.onclick = (e) => {
-    if (e.target.closest('.more')) { openLibMenu(b); return; }
-    openBook(b);
+    if (e.target.closest('.more')) { openSeriesMenu(s); return; }
+    openChapters(s);
   };
+  libLongPress(el, () => openSeriesMenu(s));
   return el;
 }
 
-/* ── меню книги ── */
-let LIB_MENU_BOOK = null;
-let libDeleteArmed = false;
-function openLibMenu(book) {
-  LIB_MENU_BOOK = book;
-  libDeleteArmed = false;
+function libLongPress(el, fn) {
+  let timer = null;
+  el.addEventListener('touchstart', () => { timer = setTimeout(() => { timer = null; fn(); }, 480); }, { passive: true });
+  el.addEventListener('touchend', () => { if (timer) { clearTimeout(timer); timer = null; } });
+  el.addEventListener('touchmove', () => { if (timer) { clearTimeout(timer); timer = null; } }, { passive: true });
+}
+
+/* ── главы серии ── */
+let LIB_OPEN_SERIES = null;
+function openChapters(s) {
+  LIB_OPEN_SERIES = s;
+  const title = $('#libChaptersTitle');
+  if (title) title.textContent = s.title || 'Главы';
+  const box = $('#libChaptersList');
+  if (box) {
+    const chs = Library.chaptersOf(s.id);
+    box.innerHTML = chs.length ? chs.map((c, i) => {
+      const st = chapState(c);
+      return `<div class="chaprow ${st === 'done' ? 'done' : st === 'reading' ? 'read' : ''}" data-id="${c.id}">
+        <div class="chapnum">${i + 1}</div>
+        <div class="chaptxt">
+          <div class="chaptitle">${escapeHtml(c.title)}</div>
+          <div class="chapmeta">${chapPlace(c)} · ${libKindName(c)}${c.at ? ' · ' + libAgo(c.at) : ''}</div>
+        </div>
+        <div class="chapgo">${st === 'done' ? '✓' : '▶'}</div>
+      </div>`;
+    }).join('') : '<div class="hint" style="padding:14px 0">В этой серии пока нет глав.</div>';
+    box.querySelectorAll('.chaprow').forEach(row => {
+      row.onclick = () => {
+        const ch = Library.books.find(b => b.id === row.dataset.id);
+        closeSheets();
+        if (ch) openBook(ch);
+      };
+    });
+  }
+  openSheet('libChapters');
+}
+
+/* ── меню серии ── */
+let SERIES_MENU = null;
+let seriesDeleteArmed = false;
+function openSeriesMenu(s) {
+  SERIES_MENU = s;
+  seriesDeleteArmed = false;
   const t = $('#libMenuTitle');
-  if (t) t.textContent = book.title || 'Книга';
+  if (t) t.textContent = s.title || 'Серия';
   const del = $('#libMenuDelete');
-  if (del) { del.textContent = 'Удалить главу'; del.classList.add('warn'); }
-  const st = libState(book);
+  if (del) del.textContent = 'Удалить серию';
   const open = $('#libMenuOpen');
-  if (open) open.textContent = st === 'reading' ? 'Продолжить' : st === 'done' ? 'Открыть' : 'Начать читать';
+  if (open) open.textContent = 'Открыть главы';
+  const start = $('#libMenuStart');
+  if (start) start.textContent = 'Продолжить чтение';
+  const fav = $('#libMenuFav');
+  if (fav) fav.textContent = s.fav ? 'Убрать из избранного' : 'В избранное';
   openSheet('libMenu');
 }
 function bindLibMenu() {
-  const close = () => { closeSheets('libMenu'); };
+  const close = () => closeSheets();
   if ($('#libMenuClose')) $('#libMenuClose').onclick = close;
-  if ($('#libMenuOpen')) $('#libMenuOpen').onclick = async () => {
-    const b = LIB_MENU_BOOK; close(); if (b) await openBook(b);
+  if ($('#libMenuOpen')) $('#libMenuOpen').onclick = () => {
+    const s = SERIES_MENU; close(); if (s) openChapters(s);
   };
-  if ($('#libMenuStart')) $('#libMenuStart').onclick = async () => {
-    const b = LIB_MENU_BOOK; close();
-    if (!b) return;
-    b.progress = 0;
-    await DB.put('books', b);
-    await Library.load();
-    await openBook(b);
+  if ($('#libMenuStart')) $('#libMenuStart').onclick = () => {
+    const s = SERIES_MENU; close();
+    const ch = s && seriesNext(s);
+    if (ch) openBook(ch);
   };
   if ($('#libMenuRename')) $('#libMenuRename').onclick = () => {
-    const b = LIB_MENU_BOOK; close();
-    if (!b) return;
-    openLibRename(b);
+    const s = SERIES_MENU; close(); if (s) openLibRename(s);
   };
   if ($('#libMenuDelete')) $('#libMenuDelete').onclick = async (e) => {
-    const b = LIB_MENU_BOOK;
-    if (!b) return;
-    // confirm() в песочнице и части мобильных браузеров глушится — спрашиваем
-    // вторым нажатием на ту же кнопку.
-    if (!libDeleteArmed) {
-      libDeleteArmed = true;
-      e.currentTarget.textContent = 'Точно удалить «' + (b.title || '').slice(0, 18) + '»?';
+    const s = SERIES_MENU;
+    if (!s) return;
+    if (!seriesDeleteArmed) {
+      seriesDeleteArmed = true;
+      e.currentTarget.textContent = 'Точно удалить «' + String(s.title || '').slice(0, 16) + '»?';
       return;
     }
     close();
-    libCoverDrop(b.id);
-    await Library.remove(b.id);
+    libCoverDrop(s.id);
+    await Library.removeSeries(s.id);
     await Library.load();
-    toast('Глава удалена');
+    toast('Серия удалена');
   };
+  // «Полка» — тот же пункт меню, что переименование, но для категории
+  if ($('#libMenuFav')) $('#libMenuFav').onclick = async () => {
+    const s = SERIES_MENU;
+    close();
+    if (!s) return;
+    s.fav = !s.fav;
+    await DB.put('books', s);
+    await Library.load();
+    toast(s.fav ? 'В избранном' : 'Убрано из избранного');
+  };
+  const catBtn = $('#libMenuCat');
+  if (catBtn) catBtn.onclick = () => { const s = SERIES_MENU; close(); if (s) openLibCat(s); };
+}
+
+/* ── полка (категория) серии ── */
+let LIB_CAT_SERIES = null;
+function openLibCat(s) {
+  LIB_CAT_SERIES = s;
+  const inp = $('#libCatInput');
+  if (inp) inp.value = s.category || 'Без полки';
+  const box = $('#libCatChips');
+  if (box) {
+    const cats = Library.cats();
+    box.innerHTML = cats.map(c => `<button class="chip" data-cat="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('')
+      || '<span class="hint">Полок пока нет — введите название.</span>';
+    box.querySelectorAll('button').forEach(b => {
+      b.onclick = () => { if (inp) inp.value = b.dataset.cat; };
+    });
+  }
+  openSheet('libCat');
+}
+function bindLibCat() {
+  const save = async () => {
+    const s = LIB_CAT_SERIES;
+    const inp = $('#libCatInput');
+    const cat = String((inp && inp.value) || '').trim() || 'Без полки';
+    closeSheets();
+    if (!s) return;
+    s.category = cat;
+    await DB.put('books', s);
+    await Library.load();
+    toast('Полка: ' + cat);
+  };
+  if ($('#libCatSave')) $('#libCatSave').onclick = save;
+  if ($('#libCatCancel')) $('#libCatCancel').onclick = () => closeSheets();
 }
 
 /* ── переименование ── */
 let LIB_RENAME_BOOK = null;
-function openLibRename(book) {
-  LIB_RENAME_BOOK = book;
+function openLibRename(s) {
+  LIB_RENAME_BOOK = s;
   const inp = $('#libRenameInput');
-  if (inp) inp.value = book.title || '';
+  if (inp) inp.value = s.title || '';
   openSheet('libRename');
   setTimeout(() => { if (inp) { inp.focus(); inp.select(); } }, 120);
 }
 function bindLibRename() {
   const save = async () => {
-    const b = LIB_RENAME_BOOK;
+    const s = LIB_RENAME_BOOK;
     const inp = $('#libRenameInput');
     const name = String((inp && inp.value) || '').trim();
-    closeSheets('libRename');
-    if (!b || !name || name === b.title) return;
-    b.title = name;
-    b.at = b.at || Date.now();
-    await DB.put('books', b);
+    closeSheets();
+    if (!s || !name || name === s.title) return;
+    s.title = name;
+    await DB.put('books', s);
     await Library.load();
     toast('Название сохранено');
   };
   if ($('#libRenameSave')) $('#libRenameSave').onclick = save;
-  if ($('#libRenameCancel')) $('#libRenameCancel').onclick = () => closeSheets('libRename');
+  if ($('#libRenameCancel')) $('#libRenameCancel').onclick = () => closeSheets();
   if ($('#libRenameInput')) $('#libRenameInput').onkeydown = (e) => { if (e.key === 'Enter') save(); };
 }
 
-/* ── поиск, сортировка, вид ── */
+/* ── история ── */
+function renderHistory() {
+  const box = $('#histList');
+  const sub = $('#histSub');
+  if (!box) return;
+  const list = Library.books.filter(b => Number(b.opened) > 0)
+    .sort((a, b) => (Number(b.opened) || 0) - (Number(a.opened) || 0));
+  if (sub) sub.textContent = list.length
+    ? `${list.length} ${plural(list.length, ['глава', 'главы', 'глав'])} · последние сверху`
+    : 'пока пусто';
+  box.innerHTML = list.length ? list.map(ch => {
+    const s = Library.seriesOf(ch);
+    const url = s ? libCoverUrl(s) : '';
+    const st = chapState(ch);
+    return `<div class="row-card" data-id="${ch.id}">
+      ${url ? `<img src="${url}" alt="" loading="lazy">` : '<div class="nofoto">НЕТ</div>'}
+      <div class="txt">
+        <div class="name">${escapeHtml(s ? s.title : ch.title)}</div>
+        <div class="meta">${escapeHtml(ch.title)} · ${chapPlace(ch)}${ch.at ? ' · ' + libAgo(ch.at) : ''}</div>
+      </div>
+      <div class="more" style="${st === 'done' ? 'color:#8fe0b0' : ''}">${st === 'done' ? '✓' : '▶'}</div>
+    </div>`;
+  }).join('') : '<div class="empty"><div class="big">История пуста</div>Открой главу — она появится здесь.</div>';
+  box.querySelectorAll('.row-card').forEach(row => {
+    row.onclick = () => {
+      const ch = Library.books.find(b => b.id === row.dataset.id);
+      if (ch) openBook(ch);
+    };
+  });
+}
+
+/* ── связки: фильтры, поиск, сортировка, вкладки ── */
 function bindLibChips() {
   $$('#libChips .chip').forEach(c => {
     c.onclick = () => { Library.filter = c.dataset.filter || 'all'; renderLibrary(); };
@@ -665,8 +938,46 @@ function bindLibChips() {
     Library.view = Library.view === 'list' ? 'grid' : 'list';
     renderLibrary();
   };
+  if ($('#libChaptersClose')) $('#libChaptersClose').onclick = () => closeSheets();
+  if ($('#btnHistClear')) $('#btnHistClear').onclick = () => {
+    // История — это метки открытия. Чистим их, сами главы остаются на полке.
+    for (const ch of Library.books) { ch.opened = 0; }
+    Promise.all(Library.books.map(ch => DB.put('books', ch))).then(() => Library.load());
+    toast('История очищена');
+  };
   bindLibMenu();
   bindLibRename();
+  bindLibCat();
+  bindLibraryNav();
+}
+
+/** Нижние вкладки: Библиотека · История · Ещё. */
+function bindLibraryNav() {
+  const nav = $('#libNav');
+  if (!nav || nav.dataset.bound === '1') return;
+  nav.dataset.bound = '1';
+  // Показываем вкладки сразу: на старте открыт экран библиотеки, и ждать
+  // переключения экрана, чтобы они появились, — неправильно.
+  nav.classList.toggle('on', !!($('#library') && $('#library').classList.contains('on')));
+  nav.querySelectorAll('.navbtn').forEach(b => {
+    b.onclick = () => libGoTab(b.dataset.tab);
+  });
+  if ($('#btnMoreModels')) $('#btnMoreModels').onclick = () => { const el = $('#btnModels'); if (el) el.click(); };
+  if ($('#btnMoreRules')) $('#btnMoreRules').onclick = () => { const el = $('#btnRulesLib'); if (el) el.click(); };
+  if ($('#btnMoreImport')) $('#btnMoreImport').onclick = () => { const el = $('#btnImport'); if (el) el.click(); };
+  const about = $('#moreAbout');
+  if (about) {
+    const v = (typeof VERSION !== 'undefined') ? VERSION : '';
+    about.innerHTML = 'KOMA · веб ' + v + '<br>Всё считается на этом устройстве: распознавание, словарь, голос. '
+      + 'Ни одного запроса наружу.';
+  }
+}
+function libGoTab(tab) {
+  if (typeof show === 'function') show(tab === 'library' ? 'library' : tab === 'history' ? 'history' : 'more');
+  const nav = $('#libNav');
+  if (nav) nav.querySelectorAll('.navbtn').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  if (tab === 'history') renderHistory();
+  if (tab === 'library') renderLibrary();
 }
 /**
  * Открыть книгу. Раньше карточка звала openBook(), а такой функции не было
@@ -675,6 +986,7 @@ function bindLibChips() {
 async function openBook(book) {
   try {
     await Reader.open(book);
+    await Library.touch(book);
   } catch (e) {
     console.error('openBook', e);
     toast('Не удалось открыть «' + book.title + '»: ' + (e && e.message ? e.message : e), 5000);

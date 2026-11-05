@@ -73,9 +73,13 @@ function bindUI() {
     $('#importCaps').textContent = 'Ваш браузер: ' + FILES.why;
     // Куда добавлять: список существующих глав
     const sel = $('#importTarget');
-    const books = Library.books || [];
-    sel.innerHTML = '<option value="">Новая глава</option>'
-      + books.map(b => `<option value="${b.id}">Добавить страницы в «${escapeHtml(b.title)}» (${b.count} стр.)</option>`).join('');
+    // Как в Yomikai: файлы добавляются главой в серию, а не отдельной книгой.
+    const series = Library.series || [];
+    sel.innerHTML = '<option value="">Новая серия</option>'
+      + series.map(s => {
+        const n = Library.chaptersOf(s.id).length;
+        return `<option value="${s.id}">Глава в «${escapeHtml(s.title)}» (${n} гл.)</option>`;
+      }).join('');
     $('#importNote').innerHTML = dirOK || fsOK
       ? 'Папка: страницы берутся все сразу, порядок — по именам файлов.'
       : 'Этот браузер не умеет выбирать папку. Нажмите «Выбрать файлы или CBZ» '
@@ -102,14 +106,16 @@ function bindUI() {
     toast('Сохраняю ' + imgs.length + ' страниц…', 5000);
     const items = imgs.map(f => ({ name: f.name, blob: f }));
     if (target) {
-      const book = await Library.appendTo(target, items);
+      // В выбранную серию — новая глава (страницы не подмешиваются в старую).
+      const chapter = await Library.addChapter(target, title, items, 'files');
       await Library.load();
-      toast('Добавлено ' + imgs.length + ' стр. в «' + book.title + '» — всего ' + book.count);
-    } else {
-      await Library.addBook(title, items, 'files');
-      await Library.load();
-      toast('Добавлено: ' + title + ' (' + imgs.length + ' стр.)');
+      const s = Library.series.find(x => x.id === target);
+      toast('Глава добавлена в «' + (s ? s.title : '') + '»: ' + title + ' (' + imgs.length + ' стр.)');
+      return;
     }
+    const chapter = await Library.addBook(title, items, 'files');
+    await Library.load();
+    toast('Новая серия: ' + seriesTitleOf(title) + ' · глава «' + chapter.title + '» (' + imgs.length + ' стр.)');
   }
 
   $('#btnPickDir').onclick = () => {

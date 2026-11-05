@@ -228,6 +228,56 @@
   .sheet{background:#12161c;border:1px solid #ffffff0f;border-bottom:0}
   .sheet .head{font-size:20px;font-weight:650;letter-spacing:-.2px;padding-bottom:2px}
   .toast{background:#0b0e13f2;border:1px solid #ffffff12;border-radius:14px}
+
+  /* ── Полки, навигация, история (1.0.30, как в Yomikai) ───────────────────── */
+  #library .libcats{display:flex;gap:8px;overflow:auto;padding:8px 0 2px;scrollbar-width:none}
+  #library .libcats::-webkit-scrollbar{display:none}
+  #library .libcats button{flex:0 0 auto;padding:7px 13px;border-radius:11px;background:#141a21;
+    border:1px solid #ffffff0d;color:var(--dim);font-size:12.5px;white-space:nowrap}
+  #library .libcats button.on{background:#241f3d;border-color:#4a3f7d;color:#e7e2ff}
+  #library .libcats button b{font-weight:600;color:#fff;margin-left:6px;opacity:.7}
+  /* состояния — компактнее полок, чтобы четыре чипа влезали в строку */
+  #library #libChips{gap:5px}
+  #library #libChips .chip{padding:6px 8px;font-size:12px;border-radius:10px}
+  #library #libChips .chip .num{margin-left:5px;font-size:11px}
+
+  /* нижняя навигация */
+  #libNav{position:fixed;left:0;right:0;bottom:0;display:none;z-index:30;
+    background:#0f1319f2;border-top:1px solid #ffffff0d;backdrop-filter:blur(8px);
+    padding:6px 6px calc(6px + env(safe-area-inset-bottom))}
+  #libNav.on{display:flex}
+  #libNav .navbtn{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;
+    padding:6px 2px;border-radius:12px;color:var(--dim);font-size:11px}
+  #libNav .navbtn span{font-size:17px;line-height:1}
+  #libNav .navbtn.on{color:var(--text);background:#ffffff0a}
+  /* полка не должна уезжать под навигацию */
+  #library .scroll,#history .scroll,#more .scroll{padding-bottom:72px}
+
+  /* история и «Ещё» — те же строки, что в полке, но не внутри #library */
+  #history .row-card,#more .row-card{display:flex;gap:12px;align-items:center;padding:9px;border-radius:14px;
+    background:#141a21;border:1px solid #ffffff0d;margin-bottom:8px}
+  #history .row-card:active{transform:scale(.99)}
+  #history .row-card img,#history .row-card .nofoto{width:46px;height:64px;border-radius:9px;object-fit:cover;
+    flex:none;background:#1b2129}
+  #history .row-card .nofoto{display:grid;place-items:center;font-size:9px;color:#4a5449}
+  #history .row-card .txt{flex:1;min-width:0}
+  #history .row-card .name{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #history .row-card .meta{font-size:11px;color:var(--dim);margin-top:3px}
+  #history .row-card .more{width:32px;height:32px;border-radius:50%;background:#ffffff10;flex:none;
+    display:grid;place-items:center;font-size:13px;color:var(--dim)}
+  #history .pad,#more .pad{padding:0 14px}
+  /* главы серии в шторке */
+  #libChaptersList .chaprow{display:flex;gap:10px;align-items:center;padding:11px 2px;
+    border-bottom:1px solid #ffffff0f}
+  #libChaptersList .chaprow:active{background:#ffffff08}
+  #libChaptersList .chapnum{width:34px;flex:none;color:var(--dim);font-size:11.5px}
+  #libChaptersList .chaptxt{flex:1;min-width:0}
+  #libChaptersList .chaptitle{font-size:13.5px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #libChaptersList .chapmeta{font-size:11px;color:var(--dim);margin-top:2px}
+  #libChaptersList .chapgo{width:34px;height:34px;border-radius:50%;background:#ffffff12;flex:none;
+    display:grid;place-items:center;font-size:13px}
+  #libChaptersList .chaprow.done .chapgo{background:#1d3a2c;color:#8fe0b0}
+  #libChaptersList .chaprow.read .chapnum{color:var(--accent)}
 </style>
 <style id="libStyle">
   /* ── Библиотека (1.0.29) ──────────────────────────────────────────────────
@@ -352,12 +402,15 @@
       <!-- Продолжить чтение -->
       <div id="libHero" class="hero"></div>
 
+      <!-- Полки (как категории в Yomikai): «Все» и свои полки -->
+      <div class="libcats" id="libCats"></div>
+
       <!-- Фильтры -->
       <div class="libchips" id="libChips">
         <button class="chip on" data-filter="all">Все<span class="num" data-count="all">0</span></button>
         <button class="chip" data-filter="reading">Читаю<span class="num" data-count="reading">0</span></button>
-        <button class="chip" data-filter="new">Не начато<span class="num" data-count="new">0</span></button>
-        <button class="chip" data-filter="done">Закончено<span class="num" data-count="done">0</span></button>
+        <button class="chip" data-filter="new">Новые<span class="num" data-count="new">0</span></button>
+        <button class="chip" data-filter="done">Дочитано<span class="num" data-count="done">0</span></button>
       </div>
 
       <!-- Сортировка и вид -->
@@ -390,9 +443,32 @@
   <div class="body">
     <button class="btn primary" id="libMenuOpen" style="width:100%;justify-content:center">Открыть</button>
     <button class="btn" id="libMenuRename" style="width:100%;margin-top:8px;justify-content:center">Переименовать</button>
-    <button class="btn" id="libMenuStart" style="width:100%;margin-top:8px;justify-content:center">Читать с начала</button>
-    <button class="btn warn" id="libMenuDelete" style="width:100%;margin-top:8px;justify-content:center">Удалить главу</button>
+    <button class="btn" id="libMenuStart" style="width:100%;margin-top:8px;justify-content:center">Продолжить чтение</button>
+    <button class="btn" id="libMenuFav" style="width:100%;margin-top:8px;justify-content:center">В избранное</button>
+    <button class="btn" id="libMenuCat" style="width:100%;margin-top:8px;justify-content:center">Полка…</button>
+    <button class="btn warn" id="libMenuDelete" style="width:100%;margin-top:8px;justify-content:center">Удалить серию</button>
     <button class="btn" id="libMenuClose" style="width:100%;margin-top:14px;justify-content:center">Закрыть</button>
+  </div>
+</div>
+
+<!-- Главы серии -->
+<div class="sheet" id="libChapters">
+  <div class="head" id="libChaptersTitle">Главы</div>
+  <div class="body">
+    <div id="libChaptersList" class="chaplist"></div>
+    <button class="btn" id="libChaptersClose" style="width:100%;margin-top:12px;justify-content:center">Закрыть</button>
+  </div>
+</div>
+
+<!-- Полка для серии -->
+<div class="sheet" id="libCat">
+  <div class="head">Полка</div>
+  <div class="body">
+    <div class="hint" id="libCatHint">Название полки — например «Манга», «Маньхуа», «Вебтуны».</div>
+    <input id="libCatInput" type="text" style="width:100%;margin-top:10px;padding:12px;border-radius:12px;background:#22242b;color:#eef2f7;border:1px solid #ffffff14;font-size:15px">
+    <div id="libCatChips" class="libchips" style="padding:10px 0 0"></div>
+    <button class="btn primary" id="libCatSave" style="width:100%;margin-top:12px;justify-content:center">Сохранить</button>
+    <button class="btn" id="libCatCancel" style="width:100%;margin-top:8px;justify-content:center">Отмена</button>
   </div>
 </div>
 
@@ -406,6 +482,35 @@
   </div>
 </div>
 
+
+<!-- ═══ История (как в Yomikai: отдельная вкладка) ═══ -->
+<section id="history" class="screen">
+  <header class="libhead">
+    <div class="title"><b>История</b><span id="histSub">что читал и где остановился</span></div>
+    <button class="icon" id="btnHistClear" title="Очистить историю" aria-label="Очистить историю"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/><path d="M10 11v5M14 11v5"/></svg></button>
+  </header>
+  <div class="scroll"><div class="pad"><div id="histList" class="liblist"></div></div></div>
+</section>
+
+<!-- ═══ Ещё ═══ -->
+<section id="more" class="screen">
+  <header class="libhead">
+    <div class="title"><b>Ещё</b><span>движок, правила, о приложении</span></div>
+  </header>
+  <div class="scroll"><div class="pad">
+    <button class="btn" id="btnMoreModels" style="width:100%;justify-content:center">Движок и модели</button>
+    <button class="btn" id="btnMoreRules" style="width:100%;margin-top:8px;justify-content:center">Правила чтения</button>
+    <button class="btn" id="btnMoreImport" style="width:100%;margin-top:8px;justify-content:center">Добавить главу</button>
+    <div class="hint" id="moreAbout" style="margin-top:16px"></div>
+  </div></div>
+</section>
+
+<!-- ═══ Нижняя навигация ═══ -->
+<nav id="libNav" class="on">
+  <button class="navbtn on" data-tab="library"><span>▤</span>Библиотека</button>
+  <button class="navbtn" data-tab="history"><span>◷</span>История</button>
+  <button class="navbtn" data-tab="more"><span>⋯</span>Ещё</button>
+</nav>
 
 <!-- ═══ Читалка ═══ -->
 <section id="reader" class="screen">

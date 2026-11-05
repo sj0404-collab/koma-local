@@ -2284,6 +2284,12 @@ const State = { scanning: false, prefetching: false, semi: false, waitingScroll:
 
 function show(id) {
   $$('.screen').forEach(s => s.classList.toggle('on', s.id === id));
+  // Нижние вкладки — только на экранах библиотеки, истории и «Ещё». В читалке
+  // они мешают: там своя нижняя панель.
+  const nav = document.getElementById('libNav');
+  if (nav) nav.classList.toggle('on', id === 'library' || id === 'history' || id === 'more');
+  const tab = nav && nav.querySelector('.navbtn[data-tab="' + id + '"]');
+  if (nav) nav.querySelectorAll('.navbtn').forEach(b => b.classList.toggle('on', b === tab));
 }
 function openSheet(id) {
   $$('.sheet').forEach(s => s.classList.toggle('on', s.id === id));
