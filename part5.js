@@ -1028,7 +1028,7 @@ const ENV = {
 function showEnvBanner() {
   const b = $('#envBanner');
   const lines = [];
-  if (ENV.sandboxed) lines.push('Открыто в предпросмотре: выбор файлов и IndexedDB могут быть заблокированы. Скачайте файл и откройте в Chrome.');
+  if (ENV.sandboxed) lines.push('Открыто в предпросмотре: браузер блокирует хранилище и выбор файлов. Рабочая копия — https://sj0404-collab.github.io/koma-local/ или этот же файл, открытый в Chrome.');
   if (DB.inMemory) lines.push('Хранилище недоступно — библиотека живёт только до перезагрузки страницы.');
   b.style.display = lines.length ? 'block' : 'none';
   b.innerHTML = lines.join('<br>');
@@ -1064,8 +1064,12 @@ async function selfCheck() {
   if (fullEl) fullEl.textContent = full;
   // А на библиотеке — только когда что-то действительно не поднялось.
   const sc = $('#selfCheck');
+  const storageOnly = errs.length > 0 && errs.every(x => /localStorage|IndexedDB|SecurityError/i.test(x));
   const bad = errs.length > 0;
-  sc.textContent = bad ? ('Не поднялось: ' + errs.join('; ') + ' — подробности в ⚙ → Сборка') : '';
+  sc.textContent = !bad ? ''
+    : storageOnly
+      ? 'Открыто в предпросмотре: браузер запретил хранилище. Откройте страницу в Chrome или на https://sj0404-collab.github.io/koma-local/ — там всё работает.'
+      : ('Не поднялось: ' + errs.join('; ') + ' — подробности в ⚙ → Сборка');
   sc.style.display = bad ? 'block' : 'none';
   sc.dataset.ok = bad ? '0' : '1';
   sc.style.background = bad ? '#7a303022' : 'transparent';
@@ -1079,6 +1083,13 @@ async function selfCheck() {
   // выполнились» — хотя кнопки при этом работали. Теперь падение одного шага
   // не мешает остальным, а его причина честно пишется в строку состояния.
   State.bootErrors = State.bootErrors || [];
+  // Надпись «Скрипты страницы не выполнились» — аварийная, для случая, когда не
+  // выполнился НИ ОДИН скрипт. Как только boot начался, она врёт: меняем на
+  // «Загрузка», а итог пишет selfCheck в конце.
+  try {
+    const scEl = document.getElementById('selfCheck');
+    if (scEl) { scEl.textContent = 'Загрузка KOMA ' + VERSION + '…'; scEl.style.color = 'var(--dim)'; scEl.style.background = 'transparent'; }
+  } catch (e) {}
   const step = async (name, fn) => {
     try { await fn(); } catch (e) {
       State.bootErrors.push(name + ': ' + ((e && e.message) || e));

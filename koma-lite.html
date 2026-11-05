@@ -937,7 +937,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.79';
+const VERSION = 'v1.9.80';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -1914,6 +1914,25 @@ async function openBook(book) {
     toast('Не удалось открыть «' + book.title + '»: ' + (e && e.message ? e.message : e), 5000);
   }
 }
+/**
+ * Безопасное хранилище настроек.
+ *
+ * В обычном браузере это localStorage, но в песочнице предпросмотра
+ * (`sandbox="allow-scripts"` без allow-same-origin) и в приватном режиме любое
+ * обращение к localStorage бросает SecurityError. Раньше это валило шаг загрузки
+ * «голос» — и на экране честно, но бесполезно висело «Не поднялось: голос…».
+ */
+const Store = {
+  get(key, def = null) {
+    try { const v = localStorage.getItem(key); return v === null ? def : v; }
+    catch (e) { return def; }
+  },
+  set(key, value) {
+    try { localStorage.setItem(key, String(value)); return true; }
+    catch (e) { return false; }
+  },
+};
+
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 /* Импорт: папка / CBZ / отдельные картинки */
@@ -8947,7 +8966,7 @@ const TTS = {
         if (!sel) return;
         // Первый пункт — «системный по умолчанию». Это НЕ заглушка: именно так
         // читают все, кто настроил голос в Android (Tera TTS и прочие).
-        const savedIdx = localStorage.getItem('koma.voice');
+        const savedIdx = Store.get('koma.voice');
         const chosen = (savedIdx !== null && savedIdx !== 'default') ? +savedIdx : -1;
         sel.innerHTML = '<option value="default">системный (как в настройках Android)</option>'
           + this.voices.map((v, i) =>
@@ -8966,13 +8985,13 @@ const TTS = {
       if (selE && typeof VOICE.engines === 'function') {
         const list = VOICE.engines();
         if (list.length) {
-          const savedE = localStorage.getItem('koma.ttsEngine') || '';
+          const savedE = Store.get('koma.ttsEngine') || '';
           selE.innerHTML = '<option value="">системный движок</option>'
             + list.map(e => `<option value="${escapeHtml(e.name)}">${escapeHtml(e.label || e.name)}${e.default ? ' · по умолчанию' : ''}</option>`).join('');
           selE.value = list.some(e => e.name === savedE) ? savedE : '';
           selE.onchange = (ev) => {
             const name = ev.target.value || '';
-            localStorage.setItem('koma.ttsEngine', name);
+            Store.set('koma.ttsEngine', name);
             try { VOICE.useEngine(name); } catch (err) { console.warn('движок не переключился', err); }
             VOICE._voices = null;          // голоса у нового движка свои
             setTimeout(fill, 400);
@@ -9001,22 +9020,22 @@ const TTS = {
       // «default» — это выбор системного голоса, а не отсутствие выбора.
       if (e.target.value === 'default') {
         this.voice = null;
-        localStorage.setItem('koma.voice', 'default');
+        Store.set('koma.voice', 'default');
       } else {
         this.voice = this.voices[+e.target.value] || null;
-        localStorage.setItem('koma.voice', e.target.value);
+        Store.set('koma.voice', e.target.value);
       }
     };
     const r = $('#rngRate');
-    r.value = +(localStorage.getItem('koma.rate') || (RULES.speechRate || 1));
+    r.value = +(Store.get('koma.rate') || (RULES.speechRate || 1));
     this.rate = +r.value;
-    r.oninput = () => { this.rate = +r.value; localStorage.setItem('koma.rate', r.value); };
+    r.oninput = () => { this.rate = +r.value; Store.set('koma.rate', r.value); };
 
     // Скорость ПРОКРУТКИ: отдельный ползунок, отдельная память. Значение из
     // правил главнее локальной памяти — правила приезжают плагином.
     const sc = $('#rngScroll');
     if (sc) {
-      const saved = Number(RULES.scrollSpeed) || +(localStorage.getItem('koma.scroll') || 1) || 1;
+      const saved = Number(RULES.scrollSpeed) || +(Store.get('koma.scroll') || 1) || 1;
       SMOOTH.speed = clamp(saved, 0.25, 2);
       sc.value = String(SMOOTH.speed);
       const hint = $('#scrollSpeedHint');
@@ -9030,7 +9049,7 @@ const TTS = {
       label();
       sc.oninput = () => {
         SMOOTH.speed = clamp(+sc.value || 1, 0.25, 2);
-        localStorage.setItem('koma.scroll', String(SMOOTH.speed));
+        Store.set('koma.scroll', String(SMOOTH.speed));
         RULES.scrollSpeed = SMOOTH.speed;
         label();
         DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) }).catch(() => {});
@@ -11307,7 +11326,7 @@ const ENV = {
 function showEnvBanner() {
   const b = $('#envBanner');
   const lines = [];
-  if (ENV.sandboxed) lines.push('Открыто в предпросмотре: выбор файлов и IndexedDB могут быть заблокированы. Скачайте файл и откройте в Chrome.');
+  if (ENV.sandboxed) lines.push('Открыто в предпросмотре: браузер блокирует хранилище и выбор файлов. Рабочая копия — https://sj0404-collab.github.io/koma-local/ или этот же файл, открытый в Chrome.');
   if (DB.inMemory) lines.push('Хранилище недоступно — библиотека живёт только до перезагрузки страницы.');
   b.style.display = lines.length ? 'block' : 'none';
   b.innerHTML = lines.join('<br>');
@@ -11343,8 +11362,12 @@ async function selfCheck() {
   if (fullEl) fullEl.textContent = full;
   // А на библиотеке — только когда что-то действительно не поднялось.
   const sc = $('#selfCheck');
+  const storageOnly = errs.length > 0 && errs.every(x => /localStorage|IndexedDB|SecurityError/i.test(x));
   const bad = errs.length > 0;
-  sc.textContent = bad ? ('Не поднялось: ' + errs.join('; ') + ' — подробности в ⚙ → Сборка') : '';
+  sc.textContent = !bad ? ''
+    : storageOnly
+      ? 'Открыто в предпросмотре: браузер запретил хранилище. Откройте страницу в Chrome или на https://sj0404-collab.github.io/koma-local/ — там всё работает.'
+      : ('Не поднялось: ' + errs.join('; ') + ' — подробности в ⚙ → Сборка');
   sc.style.display = bad ? 'block' : 'none';
   sc.dataset.ok = bad ? '0' : '1';
   sc.style.background = bad ? '#7a303022' : 'transparent';
@@ -11358,6 +11381,13 @@ async function selfCheck() {
   // выполнились» — хотя кнопки при этом работали. Теперь падение одного шага
   // не мешает остальным, а его причина честно пишется в строку состояния.
   State.bootErrors = State.bootErrors || [];
+  // Надпись «Скрипты страницы не выполнились» — аварийная, для случая, когда не
+  // выполнился НИ ОДИН скрипт. Как только boot начался, она врёт: меняем на
+  // «Загрузка», а итог пишет selfCheck в конце.
+  try {
+    const scEl = document.getElementById('selfCheck');
+    if (scEl) { scEl.textContent = 'Загрузка KOMA ' + VERSION + '…'; scEl.style.color = 'var(--dim)'; scEl.style.background = 'transparent'; }
+  } catch (e) {}
   const step = async (name, fn) => {
     try { await fn(); } catch (e) {
       State.bootErrors.push(name + ': ' + ((e && e.message) || e));

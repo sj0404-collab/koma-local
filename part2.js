@@ -15,7 +15,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.79';
+const VERSION = 'v1.9.80';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -992,6 +992,25 @@ async function openBook(book) {
     toast('Не удалось открыть «' + book.title + '»: ' + (e && e.message ? e.message : e), 5000);
   }
 }
+/**
+ * Безопасное хранилище настроек.
+ *
+ * В обычном браузере это localStorage, но в песочнице предпросмотра
+ * (`sandbox="allow-scripts"` без allow-same-origin) и в приватном режиме любое
+ * обращение к localStorage бросает SecurityError. Раньше это валило шаг загрузки
+ * «голос» — и на экране честно, но бесполезно висело «Не поднялось: голос…».
+ */
+const Store = {
+  get(key, def = null) {
+    try { const v = localStorage.getItem(key); return v === null ? def : v; }
+    catch (e) { return def; }
+  },
+  set(key, value) {
+    try { localStorage.setItem(key, String(value)); return true; }
+    catch (e) { return false; }
+  },
+};
+
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 /* Импорт: папка / CBZ / отдельные картинки */

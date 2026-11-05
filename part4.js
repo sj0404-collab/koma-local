@@ -1584,7 +1584,7 @@ const TTS = {
         if (!sel) return;
         // Первый пункт — «системный по умолчанию». Это НЕ заглушка: именно так
         // читают все, кто настроил голос в Android (Tera TTS и прочие).
-        const savedIdx = localStorage.getItem('koma.voice');
+        const savedIdx = Store.get('koma.voice');
         const chosen = (savedIdx !== null && savedIdx !== 'default') ? +savedIdx : -1;
         sel.innerHTML = '<option value="default">системный (как в настройках Android)</option>'
           + this.voices.map((v, i) =>
@@ -1603,13 +1603,13 @@ const TTS = {
       if (selE && typeof VOICE.engines === 'function') {
         const list = VOICE.engines();
         if (list.length) {
-          const savedE = localStorage.getItem('koma.ttsEngine') || '';
+          const savedE = Store.get('koma.ttsEngine') || '';
           selE.innerHTML = '<option value="">системный движок</option>'
             + list.map(e => `<option value="${escapeHtml(e.name)}">${escapeHtml(e.label || e.name)}${e.default ? ' · по умолчанию' : ''}</option>`).join('');
           selE.value = list.some(e => e.name === savedE) ? savedE : '';
           selE.onchange = (ev) => {
             const name = ev.target.value || '';
-            localStorage.setItem('koma.ttsEngine', name);
+            Store.set('koma.ttsEngine', name);
             try { VOICE.useEngine(name); } catch (err) { console.warn('движок не переключился', err); }
             VOICE._voices = null;          // голоса у нового движка свои
             setTimeout(fill, 400);
@@ -1638,22 +1638,22 @@ const TTS = {
       // «default» — это выбор системного голоса, а не отсутствие выбора.
       if (e.target.value === 'default') {
         this.voice = null;
-        localStorage.setItem('koma.voice', 'default');
+        Store.set('koma.voice', 'default');
       } else {
         this.voice = this.voices[+e.target.value] || null;
-        localStorage.setItem('koma.voice', e.target.value);
+        Store.set('koma.voice', e.target.value);
       }
     };
     const r = $('#rngRate');
-    r.value = +(localStorage.getItem('koma.rate') || (RULES.speechRate || 1));
+    r.value = +(Store.get('koma.rate') || (RULES.speechRate || 1));
     this.rate = +r.value;
-    r.oninput = () => { this.rate = +r.value; localStorage.setItem('koma.rate', r.value); };
+    r.oninput = () => { this.rate = +r.value; Store.set('koma.rate', r.value); };
 
     // Скорость ПРОКРУТКИ: отдельный ползунок, отдельная память. Значение из
     // правил главнее локальной памяти — правила приезжают плагином.
     const sc = $('#rngScroll');
     if (sc) {
-      const saved = Number(RULES.scrollSpeed) || +(localStorage.getItem('koma.scroll') || 1) || 1;
+      const saved = Number(RULES.scrollSpeed) || +(Store.get('koma.scroll') || 1) || 1;
       SMOOTH.speed = clamp(saved, 0.25, 2);
       sc.value = String(SMOOTH.speed);
       const hint = $('#scrollSpeedHint');
@@ -1667,7 +1667,7 @@ const TTS = {
       label();
       sc.oninput = () => {
         SMOOTH.speed = clamp(+sc.value || 1, 0.25, 2);
-        localStorage.setItem('koma.scroll', String(SMOOTH.speed));
+        Store.set('koma.scroll', String(SMOOTH.speed));
         RULES.scrollSpeed = SMOOTH.speed;
         label();
         DB.put('kv', { k: 'rules', v: JSON.stringify(RULES) }).catch(() => {});
