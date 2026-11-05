@@ -1510,6 +1510,25 @@ const OCR = {
   async loadBundledModels() {
     if (this._autoBundled) return false;
     this._autoBundled = true;
+    // Один файл: модели лежат внутри самой страницы (koma-standalone.html).
+    // Нужно, когда страницу открывают прямо с диска: fetch папки там запрещён,
+    // а так приложение работает и без сервера, и без сети.
+    const inFile = (typeof window !== 'undefined' && window.__KOMA_BUNDLED) || null;
+    if (inFile && inFile.det && inFile.rec && inFile.charset) {
+      const toBuf = (b64) => {
+        const bin = atob(b64), out = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+        return out.buffer;
+      };
+      await DB.put('kv', { k: 'model:det', v: toBuf(inFile.det) });
+      await DB.put('kv', { k: 'model:rec', v: toBuf(inFile.rec) });
+      await DB.put('kv', { k: 'model:dict', v: inFile.charset });
+      if (inFile.rec2) {
+        await DB.put('kv', { k: 'model:rec2', v: toBuf(inFile.rec2) });
+        await DB.put('kv', { k: 'model:rec2charset', v: String(inFile.charset).replace(/\r?\n+$/, '') });
+      }
+      return true;
+    }
     if (!/^https?:$/.test(location.protocol)) return false;
     const base = 'models/';
     const get = async (name, kind) => {
