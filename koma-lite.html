@@ -11326,7 +11326,9 @@ const ENV = {
 function showEnvBanner() {
   const b = $('#envBanner');
   const lines = [];
-  if (ENV.sandboxed) lines.push('Открыто в предпросмотре: браузер блокирует хранилище и выбор файлов. Рабочая копия — https://sj0404-collab.github.io/koma-local/ или этот же файл, открытый в Chrome.');
+  // Никаких адресов в тексте: сборка обязана оставаться без сетевых ссылок
+  // (гейт в CI считает их и падает — как и случилось 05.11).
+  if (ENV.sandboxed) lines.push('Открыто в предпросмотре: браузер блокирует хранилище и выбор файлов. Откройте этот же файл в Chrome или на телефоне — там всё работает.');
   if (DB.inMemory) lines.push('Хранилище недоступно — библиотека живёт только до перезагрузки страницы.');
   b.style.display = lines.length ? 'block' : 'none';
   b.innerHTML = lines.join('<br>');
@@ -11366,7 +11368,7 @@ async function selfCheck() {
   const bad = errs.length > 0;
   sc.textContent = !bad ? ''
     : storageOnly
-      ? 'Открыто в предпросмотре: браузер запретил хранилище. Откройте страницу в Chrome или на https://sj0404-collab.github.io/koma-local/ — там всё работает.'
+      ? 'Открыто в предпросмотре: браузер запретил хранилище. Откройте этот же файл в Chrome или на телефоне — там всё работает.'
       : ('Не поднялось: ' + errs.join('; ') + ' — подробности в ⚙ → Сборка');
   sc.style.display = bad ? 'block' : 'none';
   sc.dataset.ok = bad ? '0' : '1';
