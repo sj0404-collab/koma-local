@@ -25,9 +25,13 @@ def main():
     os.makedirs(os.path.join(ROOT, 'test'), exist_ok=True)
     shutil.copy('/home/user/mieruko/mieruko-ch01-p05.jpg', os.path.join(ROOT, 'test', 'page.jpg'))
 
-    srv = subprocess.Popen([sys.executable, '-m', 'http.server', str(SITE_PORT)],
-                           cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(1.2)
+    LIVE = 'https://sj0404-collab.github.io/koma-local/index.html'
+    live = len(sys.argv) > 1 and sys.argv[1] == 'live'
+    srv = None
+    if not live:
+        srv = subprocess.Popen([sys.executable, '-m', 'http.server', str(SITE_PORT)],
+                               cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1.2)
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
@@ -37,7 +41,7 @@ def main():
             pg.on('console', lambda m: errs.append(m.type + ': ' + m.text) if m.type in ('error', 'warning') else None)
             pg.on('pageerror', lambda e: errs.append('PAGEERROR ' + str(e)))
 
-            pg.goto(f'http://127.0.0.1:{SITE_PORT}/index.html', wait_until='load')
+            pg.goto(LIVE if live else f'http://127.0.0.1:{SITE_PORT}/index.html', wait_until='load')
             pg.wait_for_function('typeof OCR !== "undefined" && typeof recognizePage === "function"', timeout=60000)
             log('страница PWA открылась, скрипт читалки на месте')
 
@@ -75,9 +79,11 @@ def main():
                 log('ПРОВАЛ: словарь не загрузился')
 
             # 3) настоящее распознавание страницы в WASM
-            res = pg.evaluate("""async () => {
+            import base64 as _b64
+            src = ('data:image/jpeg;base64,' + _b64.b64encode(open('/home/user/mieruko/mieruko-ch01-p05.jpg','rb').read()).decode()) if live else 'test/page.jpg'
+            res = pg.evaluate("""async (src) => {
               const img = new Image();
-              img.src = 'test/page.jpg';
+              img.src = src;
               await img.decode();
               const c = document.createElement('canvas');
               c.width = img.naturalWidth; c.height = img.naturalHeight;
@@ -96,7 +102,7 @@ def main():
                 plan: r.plan || '', crops: r.crops || 0, boxes: r.boxes || 0,
                 lines,
               };
-            }""")
+            }""", src)
             log('распознавание:', json.dumps({k: res[k] for k in ('sec', 'plan', 'crops', 'boxes')}, ensure_ascii=False))
             log('поля ответа:', json.dumps(res.get('keys', []), ensure_ascii=False),
                 'регионов:', (res.get('texts') if isinstance(res.get('texts'), int) else '?'))
@@ -104,10 +110,11 @@ def main():
                 log(f'  {i}. {t}')
             pg.screenshot(path=os.path.join(SHOTS, 'pwa-02-loaded.png'))
 
+            pg.screenshot(path=os.path.join(SHOTS, 'pwa-02-live.png'))
             # 4) офлайн: отключаем сеть и перезагружаем
             pg.context.set_offline(True)
             try:
-                pg.reload(wait_until='load', timeout=30000)
+                pg.reload(wait_until='load', timeout=60000)
                 ok = pg.evaluate('typeof OCR !== "undefined"')
                 log('без сети страница открылась:', ok)
                 pg.screenshot(path=os.path.join(SHOTS, 'pwa-03-offline.png'))
@@ -123,7 +130,7 @@ def main():
             log('ошибки консоли:', json.dumps(errs[:8], ensure_ascii=False))
             br.close()
     finally:
-        srv.terminate()
+        if srv: srv.terminate()
         try:
             os.remove(os.path.join(ROOT, 'test', 'page.jpg'))
             os.rmdir(os.path.join(ROOT, 'test'))
