@@ -4,12 +4,12 @@ name: PWA в GitHub Pages
 # service worker, иконки и модели — и публикует на GitHub Pages. Оттуда PWA
 # ставится на главный экран телефона и работает без сети.
 
+# Пока включён только ручной запуск: GitHub Pages не работает в приватном
+# репозитории на бесплатном плане («Your current plan does not support GitHub
+# Pages for this repository», ответ API 422). Как только у книги появится хостинг
+# (публичный репозиторий или Cloudflare Pages), сюда добавляется push в main и
+# весь этот файл работает без правок.
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - 'apk/**'
-      - 'README.md'
   workflow_dispatch:
 
 permissions:
