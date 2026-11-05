@@ -50,7 +50,7 @@ cp koma-lite.html apk/app/src/main/assets/koma-web.html
 # ── PWA: та же полная сборка + манифест, service worker, иконки и модели ─────
 # Ставится на главный экран и работает без сети. Модели кладём рядом, чтобы не
 # выбирать файлы руками: страница сама находит папку models/ (см. loadBundledModels).
-mkdir -p pwa
+mkdir -p pwa/models pwa/icons
 cp koma-web.html pwa/index.html
 cp apk/app/src/main/assets/models/det.onnx        pwa/models/det.onnx
 cp apk/app/src/main/assets/models/rec.onnx        pwa/models/rec.onnx
