@@ -872,6 +872,25 @@ const Reader = {
    * реплики. Текст остаётся в ключе, чтобы после перераспознавания страницы
    * с другим числом строк отметки не сыпались на чужие места.
    */
+  /**
+   * ВРЕМЯ ОЗВУЧКИ РЕПЛИКИ — по тексту, а не по объекту.
+   *
+   * Объект реплики пересоздаётся при пересчёте полосы и при перерисовке, и
+   * время, записанное в него, терялось (проверка 06.11: у одной из трёх реплик
+   * было 0). Ключ — страница + нормализованный текст.
+   */
+  setSpeakMs(i, line, ms) {
+    if (!(this.speakMsMap instanceof Map)) this.speakMsMap = new Map();
+    const t = String((line && line.text) || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    if (!t || !(ms >= 0)) return;
+    this.speakMsMap.set(i + '|' + t, ms);
+    if (line && typeof line === 'object') line.speakMs = ms;
+  },
+  getSpeakMs(i, line) {
+    if (!(this.speakMsMap instanceof Map)) return 0;
+    const t = String((line && line.text) || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    return Number(this.speakMsMap.get(i + '|' + t)) || 0;
+  },
   spokenKey(i, text, idx) {
     const t = String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
     return (idx === undefined || idx === null) ? (i + '|' + t) : (i + '#' + idx + '|' + t);
@@ -1578,6 +1597,20 @@ const VOICE = {
     }
     const sw = this.synth();
     if (!sw || typeof SpeechSynthesisUtterance === 'undefined') return false;
+    // Chrome на Android «засыпает» на длинном чтении: очередь встаёт, и кажется,
+    // что голос умер. Лечится периодическим resume(), пока фраза звучит.
+    try {
+      if (!this._keep) {
+        this._keep = setInterval(() => {
+          try {
+            const s2 = VOICE.synth();
+            if (!s2) return;
+            if (s2.paused) s2.resume();
+            else if (s2.pending && !s2.speaking) s2.resume();
+          } catch (e) { /* ignore */ }
+        }, 4000);
+      }
+    } catch (e) { /* ignore */ }
     const u = new SpeechSynthesisUtterance(String(text || ''));
     try { if (opts.voice) u.voice = opts.voice; } catch (e) { /* старый голос */ }
     u.lang = opts.lang || (opts.voice && opts.voice.lang) || 'ru-RU';
@@ -2100,6 +2133,24 @@ const TTS = {
       if (gen !== this._gen) return;              // это фраза прошлого поколения
       this._retryCount = 0;
       clearTimeout(this._watch);
+      // ВРЕМЯ ОЗВУЧКИ РЕПЛИКИ (просьба 06.11, 17:05: «добавь время озвучки
+      // каждого кропа»). Пишем в саму реплику — его видно в «Текст страницы» —
+      // и в журнал. Заодно это единственный честный признак, что звук был:
+      // движок, который «проглотил» фразу, даёт подозрительно короткое время.
+      try {
+        const msAll = Date.now() - t0;
+        line.speakMs = msAll;
+        line.voicedAt = new Date().toLocaleTimeString('ru-RU');
+        try { Reader.setSpeakMs(Reader.page, line, msAll); } catch (e) { /* ignore */ }
+        Journal.add('голос', 'озвучка ' + (msAll / 1000).toFixed(1) + ' с · «'
+          + String(line.text || '').slice(0, 40) + (String(line.text || '').length > 40 ? '…' : '') + '»', { ms: msAll });
+        // Если открыт «Текст страницы» — обновляем список, чтобы время озвучки
+        // было видно сразу, а не после повторного открытия шторки.
+        if (typeof renderTextSheet === 'function') {
+          const sh = $('#sheetText');
+          if (sh && sh.classList.contains('on') && Reader.textPage === Reader.page) renderTextSheet(Reader.textPage);
+        }
+      } catch (e) { /* журнала может не быть */ }
       try { SpeakCursor.stop(); } catch (e) {}
       // Движок может «проглотить» фразу: прислать start и сразу end. На телефоне
       // 2.11 (скриншот 20:11) так и вышло — реплики «прочитаны», звука нет.
@@ -2110,6 +2161,8 @@ const TTS = {
       const letters = (String(line.text || '').match(/\p{L}/gu) || []).length;
       if (letters >= 8 && ms < 250) {
         this._fastSilent = (this._fastSilent || 0) + 1;
+        try { Journal.add('голос', 'движок «проглотил» фразу: ' + ms + ' мс на '
+          + letters + ' букв · «' + String(line.text || '').slice(0, 40) + '»'); } catch (e) { /* ignore */ }
         if (!this._fastSilentHinted) {
           this._fastSilentHinted = true;
           toast('Голос ответил мгновенно — похоже, движок молчит: ⚙ → «Проверить голос»', 8000);
@@ -2145,6 +2198,8 @@ const TTS = {
         // ЕЁ один раз, и только если за это время не начали другую.
         const n = (this._retryCount || 0) + 1;
         this._retryCount = n;
+        try { Journal.add('голос', 'фраза оборвана (' + code + '), попытка ' + n + ' · «'
+          + String(line.text || '').slice(0, 40) + '»'); } catch (e) { /* ignore */ }
         if (n <= 1 && !this.stopped) {
           setTimeout(() => { if (!this.stopped && gen === this._gen) this.speakLine(line, then); }, 220);
           return;
@@ -2785,6 +2840,10 @@ async function renderTextSheet(i) {
       + (data.uncoveredLines ? ` · строк вне боксов: ${data.uncoveredLines}` : '')
       + (data.wordsFixed ? ` · дочинено слов: ${data.wordsFixed}` : '')
       + (data.recovered ? ` · строк приклеено страховкой: ${data.recovered}` : '')
+      + (() => {
+        const voiced = (data.lines || []).reduce((a, l) => a + (Number(l.speakMs) || Reader.getSpeakMs(i, l) || 0), 0);
+        return voiced > 0 ? ` · озвучено ${(voiced / 1000).toFixed(1)} с` : '';
+      })()
       + stamp);
   // Показываем ВСЕ реплики страницы, включая уже прочитанные: прочитанное не
   // исчезает из списка, а помечается. Иначе выглядело бы, будто текст пропал.
@@ -2824,7 +2883,12 @@ async function renderTextSheet(i) {
             + `<b>${counter}</b>${done ? '<span class="done">✔ </span>' : ''}${escapeHtml(l.text)}`
             + (l.large ? '<span class="hint"> · крупный текст</span>' : '')
             + (onScreenLine(l) === false ? '<span class="hint"> · за кадром</span>' : '')
-            + (done ? '<span class="hint"> · прочитано</span>' : '') + '</div>';
+            + (done ? '<span class="hint"> · прочитано</span>' : '')
+            // Время озвучки этой реплики (просьба 06.11, 17:05). Видно сразу,
+            // сколько длилось звучание — и сразу заметно «проглоченную» фразу.
+            + ((Number(l.speakMs) || Reader.getSpeakMs(i, l)) > 0
+              ? '<span class="hint"> · озвучка ' + (((Number(l.speakMs) || Reader.getSpeakMs(i, l))) / 1000).toFixed(1) + ' с</span>' : '')
+            + '</div>';
         }).join('');
       }).join('')
     : '<div class="hint">Реплик не найдено</div>';
@@ -2946,6 +3010,59 @@ async function renderNativeOcr() {
  * что видит браузер. Нужна, потому что «молчит» — это три разные причины
  * (нет голосов в системе, браузер запретил озвучку, синтез не ответил).
  */
+/**
+ * ПОДРОБНАЯ ПРОВЕРКА СИНТЕЗА (для настроек и журнала).
+ *
+ * Отвечает на вопрос «почему молчит» числами, а не догадками:
+ * приняла ли движок фразу, через сколько она началась, сколько длилась,
+ * какая ошибка пришла, сколько голосов видит система, не стоит ли движок
+ * на паузе. Всё это пишется в журнал.
+ *
+ * opts.silent — тихая проверка (громкость почти ноль, одно короткое слово):
+ * так приложение греет синтез при запуске, не мешая человеку.
+ */
+async function ttsSelfTest(opts = {}) {
+  const silent = !!opts.silent;
+  const res = { ok: false, kind: '', voices: 0, started: false, ended: false, ms: 0, error: '', paused: false, text: '' };
+  try {
+    res.kind = VOICE.kind ? VOICE.kind() : 'нет';
+    res.voices = (VOICE.voices && VOICE.voices().length) || 0;
+    const sw = VOICE.synth ? VOICE.synth() : null;
+    res.paused = !!(sw && sw.paused);
+    if (!VOICE.available()) { res.error = 'синтеза речи в этой среде нет'; res.text = 'Синтеза речи нет'; return res; }
+    if (res.paused && sw) { try { sw.resume(); } catch (e) { /* ignore */ } }
+    const phrase = silent ? 'раз' : 'Проверка голоса. Раз, два, три.';
+    const t0 = Date.now();
+    const accepted = VOICE.speak(phrase, {
+      lang: (TTS.voice && TTS.voice.lang) || 'ru-RU',
+      rate: silent ? 1 : (TTS.rate || 1),
+      volume: silent ? 0.02 : 1,
+      voice: TTS.pickVoice ? TTS.pickVoice() : null,
+      onstart: () => { res.started = true; res.startMs = Date.now() - t0; },
+      onend: () => { res.ended = true; res.ms = Date.now() - t0; },
+      onerror: (e) => { res.error = String((e && e.error) || e); res.ms = Date.now() - t0; },
+    });
+    if (!accepted) { res.error = res.error || 'движок не принял фразу'; }
+    const wait = silent ? 2500 : 6000;
+    const until = Date.now() + wait;
+    while (Date.now() < until && !res.ended && !res.error) await sleep(100);
+    res.ok = !!(res.started && !res.error) && (!res.ended || res.ms > 150 || silent);
+    res.text = [
+      'движок: ' + res.kind,
+      'голосов: ' + res.voices,
+      res.started ? ('старт ' + (res.startMs || 0) + ' мс') : 'не заговорил',
+      res.ended ? ('длительность ' + res.ms + ' мс') : '',
+      res.error ? ('ошибка: ' + res.error) : '',
+      res.paused ? 'движок был на паузе — снял' : '',
+    ].filter(Boolean).join(' · ');
+  } catch (e) {
+    res.error = String((e && e.message) || e);
+    res.text = 'проверка не удалась: ' + res.error;
+  }
+  try { Journal.add('голос', (silent ? 'прогрев: ' : 'проверка TTS: ') + res.text, res); } catch (e) { /* ignore */ }
+  return res;
+}
+
 async function selfTestVoice() {
   if (!VOICE.available()) {
     // Раньше здесь было «В этой среде вообще нет синтеза речи (speechSynthesis

@@ -557,6 +557,7 @@
     <button class="btn" id="btnMoreModels" style="width:100%;justify-content:center">Движок и модели</button>
     <button class="btn" id="btnMoreRules" style="width:100%;margin-top:8px;justify-content:center">Правила чтения</button>
     <button class="btn" id="btnMoreImport" style="width:100%;margin-top:8px;justify-content:center">Добавить главу</button>
+    <button class="btn" id="btnMoreJournal" style="width:100%;margin-top:8px;justify-content:center">Журнал и неполадки</button>
     <div class="hint" id="moreAbout" style="margin-top:16px"></div>
   </div></div>
 </section>
@@ -665,10 +666,19 @@
       <button class="btn" id="btnPickModelDir">Папка с моделями</button>
       <button class="btn" id="btnTestEngine">Проверить движок</button>
       <button class="btn" id="btnTestVoice">Проверить голос</button>
+      <button class="btn" id="btnWarmVoice">Прогреть голос</button>
       <button class="btn" id="btnPickDict">Словарь ru_250k</button>
     </div>
     <div class="row" style="margin-top:8px;gap:8px">
       <button class="btn" id="btnClearModels">Убрать модели</button>
+    </div>
+    <!-- ГОЛОС: состояние синтеза речи и его проверка. Проверка идёт и сама при
+         запуске — чтобы первая реплика на странице не ждала холодного старта. -->
+    <div class="lbl">ГОЛОС (СИНТЕЗ РЕЧИ)</div>
+    <div class="kv" id="voiceState">проверяю…</div>
+    <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn" id="btnVoiceCheck">Проверить TTS</button>
+      <button class="btn" id="btnVoiceReport">В журнал</button>
     </div>
     <!-- Нативное распознавание: видно ТОЛЬКО внутри АПК. Модели там лежат
          в приложении, считает ONNX Runtime для Android — без WASM и без 11 МБ
@@ -741,6 +751,7 @@
     <div class="hint">Ключ — что вернул OCR, значение — как надо. Сравнение без регистра.</div>
     <textarea id="wordFixesBox" rows="4" placeholder='{"Пвтор":"Автор","Форирование":"Формирование"}'></textarea>
     <button class="btn" id="btnWordFixesSave" style="margin-top:8px">Сохранить правки</button>
+    <button class="btn" id="btnOpenJournal" style="margin-top:10px;width:100%">Журнал: что случилось и как лечить</button>
     <button class="btn" id="closeSheets2" style="margin-top:18px;width:100%">Закрыть</button>
   </div>
 </div>
@@ -901,6 +912,25 @@
 </div>
 
 <!-- ═══ Шторка: текст страницы ═══ -->
+<!-- ═══ Шторка: журнал (события приложения + список известных неполадок) ═══ -->
+<div class="sheet" id="sheetJournal">
+  <div class="head">Журнал</div>
+  <div class="body">
+    <div class="hint">Здесь два списка: <b>события</b> — что приложение делало и на чём спотыкалось
+      (голос, распознавание, обновления), и <b>неполадки</b> — что вообще может случиться,
+      как это проверить и как лечить. Если что-то не работает — пришлите кусок событий.</div>
+    <div class="lbl">СОБЫТИЯ <span id="jrnCount" class="hint"></span></div>
+    <div id="jrnEvents" style="max-height:260px;overflow:auto;font-size:12.5px;line-height:1.45"></div>
+    <div class="row" style="gap:8px;margin-top:10px">
+      <button class="btn" id="btnJrnCopy">Скопировать</button>
+      <button class="btn" id="btnJrnClear">Очистить</button>
+    </div>
+    <div class="lbl">НЕПОЛАДКИ И КАК ИХ ЛЕЧИТЬ</div>
+    <div id="jrnKnown"></div>
+    <button class="btn" id="closeSheets6" style="margin-top:18px;width:100%">Закрыть</button>
+  </div>
+</div>
+
 <div class="sheet" id="sheetText">
   <div class="head" id="textTitle">Текст страницы</div>
   <div class="body">
@@ -2868,14 +2898,193 @@ function toast(msg, ms = 2200) {
   el.textContent = msg; el.classList.add('on');
   clearTimeout(toast._t);
   toast._t = setTimeout(() => el.classList.remove('on'), ms);
+  // Каждый тост — это и есть «что сказало приложение». Пишем его в журнал:
+  // человек потом может открыть журнал и показать, на чём именно споткнулись,
+  // вместо «оно не работает».
+  try { Journal.add('сообщение', String(msg || '')); } catch (e) { /* журнала ещё нет */ }
 }
+
+/* ───────────────────────── 0.1 ЖУРНАЛ ─────────────────────────
+   Просьба с телефона 06.11, 17:05: «добавь журнал, где описано все баги, что
+   могли случиться и каких нету, и как их исправлять, как логи приложения».
+
+   Здесь две части:
+     · СОБЫТИЯ — кольцевой список того, что приложение реально делало: голос
+       (старт/конец/обрыв и время озвучки), распознавание (полоса, время,
+       сколько реплик), обновления, ошибки загрузки. Хранится в базе, переживает
+       перезапуск, выгружается кнопкой «Скопировать».
+     · НЕПОЛАДКИ — каталог известных проблем: что бывает, как проверить, как
+       лечить, и в какой сборке исправлено. Он статический, но именно его
+       человек читает, когда «что-то не так».
+*/
+const Journal = {
+  events: [],
+  max: 400,
+  _saveT: null,
+  _loaded: false,
+
+  /** Известные неполадки. status: fixed — исправлено, watch — под наблюдением, open — открыто. */
+  known: [
+    {
+      id: 'voice-first-only',
+      title: 'Голос читает только первую реплику, дальше «страница дочитана»',
+      status: 'fixed', since: 'v1.9.92–1.9.92',
+      check: 'Нажмите ▶ на полосе с 2–3 репликами. В журнале должно быть по строке «озвучка … с» на КАЖДУЮ реплику.',
+      fix: 'Читалка больше не отменяет речь перед каждой фразой, колбэки прошлой фразы не могут двигать очередь, оборванная фраза повторяется один раз.',
+      more: 'Если повторится — в журнале будет «оборвана, повтор» или «движок не начал фразу». Пришлите эти строки.',
+    },
+    {
+      id: 'page-done-silent',
+      title: '«Страница дочитана», а звука не было',
+      status: 'fixed', since: 'v1.9.89',
+      check: 'После ▶ не должно быть галочек «прочитано» без озвучки: отметка ставится только по концу фразы.',
+      fix: 'Если движок дважды подряд «проглотил» фразу, чтение останавливается с сообщением, страница НЕ объявляется дочитанной.',
+    },
+    {
+      id: 'tts-slow-start',
+      title: 'Первая реплика начинается с задержкой',
+      status: 'fixed', since: 'v1.9.89–1.9.92',
+      check: '⚙ «Движок и модели» → блок «ГОЛОС»: там видно время старта проверки.',
+      fix: 'Синтез прогревается при запуске приложения и при открытии главы, плюс кнопка «Прогреть голос». После прогрева страницы читаются сразу.',
+    },
+    {
+      id: 'tts-no-voice',
+      title: '«Система не дала ни одного голоса» / голос молчит',
+      status: 'watch', since: '—',
+      check: '⚙ → «Проверить TTS». В отчёте будет список голосов и ошибка движка, если она есть.',
+      fix: 'Это настройка Android: Настройки → Система → Языки → Синтез речи → выбрать движок (Google TTS / Tera TTS) и русский голос, затем «Прогреть голос».',
+    },
+    {
+      id: 'scan-loop',
+      title: 'Тост «Полоса/Страница … обновлена: 0 реплик» повторяется сам',
+      status: 'fixed', since: 'v1.9.88',
+      check: 'Страница с облачком, где только «…»: подождите 30 секунд без нажатий — должен быть один проход, не серия.',
+      fix: 'Полоса считается прочитанной по объединению кусков и не пересчитывается 12 секунд подряд.',
+    },
+    {
+      id: 'dark-text',
+      title: 'Белый текст на тёмном фоне не попадает в реплики',
+      status: 'fixed', since: 'v1.9.88',
+      check: '«Текст страницы»: надписи поверх тёмного рисунка должны быть в списке.',
+      fix: 'Кроп с тёмным фоном автоматически инвертируется перед распознаванием.',
+    },
+    {
+      id: 'word-lost',
+      title: 'Слово в облачке не подсвечено / пропало',
+      status: 'watch', since: 'v1.9.86',
+      check: '«Текст страницы» → «Распознать заново»: строка должна появиться. Все найденные рамки обязаны иметь текст.',
+      fix: 'Рамки рисуются до распознавания, пустых не остаётся. Если слово так и не читается — это ошибка распознавателя: пришлите страницу в журнал.',
+    },
+    {
+      id: 'scan-ahead',
+      title: 'Распознаёт больше, чем видно в кадре',
+      status: 'fixed', since: 'v1.9.87',
+      check: '«Текст страницы»: «полос: N»; на экране должна быть только текущая полоса.',
+      fix: 'Полоса считается по готовой раскладке ленты, распознаётся ровно видимое.',
+    },
+    {
+      id: 'play-jumps',
+      title: '▶ молча уезжает на следующую страницу',
+      status: 'fixed', since: 'v1.9.87',
+      check: 'Нажмите ▶ на полосе, где есть текст — должна зазвучать реплика из кадра.',
+      fix: 'Перед переходом полоса пересчитывается по геометрии; если в кадре пусто, читалка говорит «листните», а не уезжает.',
+    },
+    {
+      id: 'update-stuck',
+      title: 'Обновил страницу, а версия старая (правки «не доехали»)',
+      status: 'fixed', since: 'v1.9.90',
+      check: 'Версия в шапке читалки. При расхождении с сервером приложение само показывает «Вышла новая версия …».',
+      fix: 'Кеш помечается версией, оболочка берётся мимо кеша, сверка с version.json при запуске и при возврате на экран.',
+    },
+    {
+      id: 'slow-ocr',
+      title: 'Распознавание медленное: 2–4 с на полосу',
+      status: 'open', since: '—',
+      check: '«Текст страницы»: «итого X с = детектор Y + распознавание Z».',
+      fix: 'Пока не ускорено. Помогает «Распознать всю страницу целиком» на длинных страницах и предраспознавание во время чтения.',
+    },
+    {
+      id: 'variants',
+      title: '«Перебор вариантов: 3–8» — непонятно, что выбрано',
+      status: 'open', since: '—',
+      check: 'Строка в «Текст страницы», если распознавание шло тяжёлым путём.',
+      fix: 'Пока не сделано: нужен показ выбранного варианта. Правки слов можно задать в ☰ → «Правки слов».',
+    },
+    {
+      id: 'comicinfo',
+      title: 'ComicInfo.xml не читается',
+      status: 'open', since: '—',
+      fix: 'Пока нет. Название серии и номера глав берутся из имён файлов.',
+    },
+    {
+      id: 'no-audio-env',
+      title: 'В этой среде нет синтеза речи вовсе',
+      status: 'watch', since: '—',
+      check: '⚙ → «Проверить TTS»: «движок: Web Speech / Android TTS / нет».',
+      fix: 'В обычном браузере Android Web Speech есть всегда; в предпросмотрах и урезанных WebView — нет. В АПК используется Android TTS.',
+    },
+    {
+      id: 'memory',
+      title: 'Стало медленно, страниц много',
+      status: 'watch', since: '—',
+      check: '☰ → «Буфер строк»: сколько страниц и строк сохранено.',
+      fix: '☰ → «Буфер строк» → «Очистить», или ⚙ «Забыть текст этой книги» — распознанное пересчитается заново.',
+    },
+  ],
+
+  async init() {
+    if (this._loaded) return;
+    this._loaded = true;
+    try {
+      const row = await DB.get('kv', 'journal');
+      const v = (row && row.v) || [];
+      if (Array.isArray(v) && v.length) this.events = v.slice(-this.max);
+    } catch (e) { /* базы нет — живём в памяти */ }
+  },
+
+  /** Записать событие: cat — «голос», «распознавание», «обновление», «ошибка»… */
+  add(cat, text, data) {
+    const t = new Date();
+    const hh = String(t.getHours()).padStart(2, '0');
+    const mm = String(t.getMinutes()).padStart(2, '0');
+    const ss = String(t.getSeconds()).padStart(2, '0');
+    const e = { t: hh + ':' + mm + ':' + ss, cat: String(cat || 'событие'), text: String(text || '') };
+    if (data && typeof data === 'object') e.data = data;
+    this.events.push(e);
+    if (this.events.length > this.max) this.events = this.events.slice(-this.max);
+    if (this._saveT) clearTimeout(this._saveT);
+    this._saveT = setTimeout(() => { this._saveT = null; this.save().catch(() => {}); }, 1200);
+    // Если журнал открыт — показываем сразу, без перерисовки вручную.
+    try { if (typeof renderJournal === 'function'
+      && $('#sheetJournal') && $('#sheetJournal').classList.contains('on')) renderJournal(); } catch (err) { /* ignore */ }
+    return e;
+  },
+
+  async save() {
+    try { await DB.put('kv', { k: 'journal', v: this.events.slice(-this.max) }); } catch (e) { /* ignore */ }
+  },
+
+  clear() {
+    this.events = [];
+    try { DB.put('kv', { k: 'journal', v: [] }).catch(() => {}); } catch (e) { /* ignore */ }
+  },
+
+  /** Текст для «Скопировать»: шапка с версией и все события. */
+  asText() {
+    const head = 'KOMA ' + (typeof VERSION !== 'undefined' ? VERSION : '?')
+      + ' · ' + new Date().toLocaleString('ru-RU') + '\n';
+    const body = this.events.map(e => '[' + e.t + '] ' + e.cat + ' · ' + e.text).join('\n');
+    return head + body;
+  },
+};
+
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // Macrotask-пауза: await внутри async-цепочек даёт только микрозадачи, браузер
 // не рисует и не обрабатывает ввод — на телефоне бейдж «Распознаём…» замирает
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.91';
+const VERSION = 'v1.9.92';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -10700,6 +10909,25 @@ const Reader = {
    * реплики. Текст остаётся в ключе, чтобы после перераспознавания страницы
    * с другим числом строк отметки не сыпались на чужие места.
    */
+  /**
+   * ВРЕМЯ ОЗВУЧКИ РЕПЛИКИ — по тексту, а не по объекту.
+   *
+   * Объект реплики пересоздаётся при пересчёте полосы и при перерисовке, и
+   * время, записанное в него, терялось (проверка 06.11: у одной из трёх реплик
+   * было 0). Ключ — страница + нормализованный текст.
+   */
+  setSpeakMs(i, line, ms) {
+    if (!(this.speakMsMap instanceof Map)) this.speakMsMap = new Map();
+    const t = String((line && line.text) || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    if (!t || !(ms >= 0)) return;
+    this.speakMsMap.set(i + '|' + t, ms);
+    if (line && typeof line === 'object') line.speakMs = ms;
+  },
+  getSpeakMs(i, line) {
+    if (!(this.speakMsMap instanceof Map)) return 0;
+    const t = String((line && line.text) || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    return Number(this.speakMsMap.get(i + '|' + t)) || 0;
+  },
   spokenKey(i, text, idx) {
     const t = String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
     return (idx === undefined || idx === null) ? (i + '|' + t) : (i + '#' + idx + '|' + t);
@@ -11406,6 +11634,20 @@ const VOICE = {
     }
     const sw = this.synth();
     if (!sw || typeof SpeechSynthesisUtterance === 'undefined') return false;
+    // Chrome на Android «засыпает» на длинном чтении: очередь встаёт, и кажется,
+    // что голос умер. Лечится периодическим resume(), пока фраза звучит.
+    try {
+      if (!this._keep) {
+        this._keep = setInterval(() => {
+          try {
+            const s2 = VOICE.synth();
+            if (!s2) return;
+            if (s2.paused) s2.resume();
+            else if (s2.pending && !s2.speaking) s2.resume();
+          } catch (e) { /* ignore */ }
+        }, 4000);
+      }
+    } catch (e) { /* ignore */ }
     const u = new SpeechSynthesisUtterance(String(text || ''));
     try { if (opts.voice) u.voice = opts.voice; } catch (e) { /* старый голос */ }
     u.lang = opts.lang || (opts.voice && opts.voice.lang) || 'ru-RU';
@@ -11928,6 +12170,24 @@ const TTS = {
       if (gen !== this._gen) return;              // это фраза прошлого поколения
       this._retryCount = 0;
       clearTimeout(this._watch);
+      // ВРЕМЯ ОЗВУЧКИ РЕПЛИКИ (просьба 06.11, 17:05: «добавь время озвучки
+      // каждого кропа»). Пишем в саму реплику — его видно в «Текст страницы» —
+      // и в журнал. Заодно это единственный честный признак, что звук был:
+      // движок, который «проглотил» фразу, даёт подозрительно короткое время.
+      try {
+        const msAll = Date.now() - t0;
+        line.speakMs = msAll;
+        line.voicedAt = new Date().toLocaleTimeString('ru-RU');
+        try { Reader.setSpeakMs(Reader.page, line, msAll); } catch (e) { /* ignore */ }
+        Journal.add('голос', 'озвучка ' + (msAll / 1000).toFixed(1) + ' с · «'
+          + String(line.text || '').slice(0, 40) + (String(line.text || '').length > 40 ? '…' : '') + '»', { ms: msAll });
+        // Если открыт «Текст страницы» — обновляем список, чтобы время озвучки
+        // было видно сразу, а не после повторного открытия шторки.
+        if (typeof renderTextSheet === 'function') {
+          const sh = $('#sheetText');
+          if (sh && sh.classList.contains('on') && Reader.textPage === Reader.page) renderTextSheet(Reader.textPage);
+        }
+      } catch (e) { /* журнала может не быть */ }
       try { SpeakCursor.stop(); } catch (e) {}
       // Движок может «проглотить» фразу: прислать start и сразу end. На телефоне
       // 2.11 (скриншот 20:11) так и вышло — реплики «прочитаны», звука нет.
@@ -11938,6 +12198,8 @@ const TTS = {
       const letters = (String(line.text || '').match(/\p{L}/gu) || []).length;
       if (letters >= 8 && ms < 250) {
         this._fastSilent = (this._fastSilent || 0) + 1;
+        try { Journal.add('голос', 'движок «проглотил» фразу: ' + ms + ' мс на '
+          + letters + ' букв · «' + String(line.text || '').slice(0, 40) + '»'); } catch (e) { /* ignore */ }
         if (!this._fastSilentHinted) {
           this._fastSilentHinted = true;
           toast('Голос ответил мгновенно — похоже, движок молчит: ⚙ → «Проверить голос»', 8000);
@@ -11973,6 +12235,8 @@ const TTS = {
         // ЕЁ один раз, и только если за это время не начали другую.
         const n = (this._retryCount || 0) + 1;
         this._retryCount = n;
+        try { Journal.add('голос', 'фраза оборвана (' + code + '), попытка ' + n + ' · «'
+          + String(line.text || '').slice(0, 40) + '»'); } catch (e) { /* ignore */ }
         if (n <= 1 && !this.stopped) {
           setTimeout(() => { if (!this.stopped && gen === this._gen) this.speakLine(line, then); }, 220);
           return;
@@ -12613,6 +12877,10 @@ async function renderTextSheet(i) {
       + (data.uncoveredLines ? ` · строк вне боксов: ${data.uncoveredLines}` : '')
       + (data.wordsFixed ? ` · дочинено слов: ${data.wordsFixed}` : '')
       + (data.recovered ? ` · строк приклеено страховкой: ${data.recovered}` : '')
+      + (() => {
+        const voiced = (data.lines || []).reduce((a, l) => a + (Number(l.speakMs) || Reader.getSpeakMs(i, l) || 0), 0);
+        return voiced > 0 ? ` · озвучено ${(voiced / 1000).toFixed(1)} с` : '';
+      })()
       + stamp);
   // Показываем ВСЕ реплики страницы, включая уже прочитанные: прочитанное не
   // исчезает из списка, а помечается. Иначе выглядело бы, будто текст пропал.
@@ -12652,7 +12920,12 @@ async function renderTextSheet(i) {
             + `<b>${counter}</b>${done ? '<span class="done">✔ </span>' : ''}${escapeHtml(l.text)}`
             + (l.large ? '<span class="hint"> · крупный текст</span>' : '')
             + (onScreenLine(l) === false ? '<span class="hint"> · за кадром</span>' : '')
-            + (done ? '<span class="hint"> · прочитано</span>' : '') + '</div>';
+            + (done ? '<span class="hint"> · прочитано</span>' : '')
+            // Время озвучки этой реплики (просьба 06.11, 17:05). Видно сразу,
+            // сколько длилось звучание — и сразу заметно «проглоченную» фразу.
+            + ((Number(l.speakMs) || Reader.getSpeakMs(i, l)) > 0
+              ? '<span class="hint"> · озвучка ' + (((Number(l.speakMs) || Reader.getSpeakMs(i, l))) / 1000).toFixed(1) + ' с</span>' : '')
+            + '</div>';
         }).join('');
       }).join('')
     : '<div class="hint">Реплик не найдено</div>';
@@ -12774,6 +13047,59 @@ async function renderNativeOcr() {
  * что видит браузер. Нужна, потому что «молчит» — это три разные причины
  * (нет голосов в системе, браузер запретил озвучку, синтез не ответил).
  */
+/**
+ * ПОДРОБНАЯ ПРОВЕРКА СИНТЕЗА (для настроек и журнала).
+ *
+ * Отвечает на вопрос «почему молчит» числами, а не догадками:
+ * приняла ли движок фразу, через сколько она началась, сколько длилась,
+ * какая ошибка пришла, сколько голосов видит система, не стоит ли движок
+ * на паузе. Всё это пишется в журнал.
+ *
+ * opts.silent — тихая проверка (громкость почти ноль, одно короткое слово):
+ * так приложение греет синтез при запуске, не мешая человеку.
+ */
+async function ttsSelfTest(opts = {}) {
+  const silent = !!opts.silent;
+  const res = { ok: false, kind: '', voices: 0, started: false, ended: false, ms: 0, error: '', paused: false, text: '' };
+  try {
+    res.kind = VOICE.kind ? VOICE.kind() : 'нет';
+    res.voices = (VOICE.voices && VOICE.voices().length) || 0;
+    const sw = VOICE.synth ? VOICE.synth() : null;
+    res.paused = !!(sw && sw.paused);
+    if (!VOICE.available()) { res.error = 'синтеза речи в этой среде нет'; res.text = 'Синтеза речи нет'; return res; }
+    if (res.paused && sw) { try { sw.resume(); } catch (e) { /* ignore */ } }
+    const phrase = silent ? 'раз' : 'Проверка голоса. Раз, два, три.';
+    const t0 = Date.now();
+    const accepted = VOICE.speak(phrase, {
+      lang: (TTS.voice && TTS.voice.lang) || 'ru-RU',
+      rate: silent ? 1 : (TTS.rate || 1),
+      volume: silent ? 0.02 : 1,
+      voice: TTS.pickVoice ? TTS.pickVoice() : null,
+      onstart: () => { res.started = true; res.startMs = Date.now() - t0; },
+      onend: () => { res.ended = true; res.ms = Date.now() - t0; },
+      onerror: (e) => { res.error = String((e && e.error) || e); res.ms = Date.now() - t0; },
+    });
+    if (!accepted) { res.error = res.error || 'движок не принял фразу'; }
+    const wait = silent ? 2500 : 6000;
+    const until = Date.now() + wait;
+    while (Date.now() < until && !res.ended && !res.error) await sleep(100);
+    res.ok = !!(res.started && !res.error) && (!res.ended || res.ms > 150 || silent);
+    res.text = [
+      'движок: ' + res.kind,
+      'голосов: ' + res.voices,
+      res.started ? ('старт ' + (res.startMs || 0) + ' мс') : 'не заговорил',
+      res.ended ? ('длительность ' + res.ms + ' мс') : '',
+      res.error ? ('ошибка: ' + res.error) : '',
+      res.paused ? 'движок был на паузе — снял' : '',
+    ].filter(Boolean).join(' · ');
+  } catch (e) {
+    res.error = String((e && e.message) || e);
+    res.text = 'проверка не удалась: ' + res.error;
+  }
+  try { Journal.add('голос', (silent ? 'прогрев: ' : 'проверка TTS: ') + res.text, res); } catch (e) { /* ignore */ }
+  return res;
+}
+
 async function selfTestVoice() {
   if (!VOICE.available()) {
     // Раньше здесь было «В этой среде вообще нет синтеза речи (speechSynthesis
@@ -13590,6 +13916,36 @@ function bindUI() {
   $('#btnOcr2').onclick = openTextSheet;
   $('#btnSettings').onclick = () => { openSheet('sheetSettings'); syncSettingsUI(); };
   $('#btnMore').onclick = () => { openSheet('sheetRules'); renderRulesInfo(); renderBufferSheet(); };
+  // Журнал: и с экрана «Ещё», и из шторки правил, и из настроек движка.
+  if ($('#btnMoreJournal')) $('#btnMoreJournal').onclick = () => openJournal();
+  if ($('#btnOpenJournal')) $('#btnOpenJournal').onclick = () => openJournal();
+  if ($('#closeSheets6')) $('#closeSheets6').onclick = closeSheets;
+  if ($('#btnJrnClear')) $('#btnJrnClear').onclick = () => { Journal.clear(); renderJournal(); toast('Журнал очищен', 2000); };
+  if ($('#btnJrnCopy')) $('#btnJrnCopy').onclick = async () => {
+    const text = Journal.asText();
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(text); toast('Журнал скопирован — можно вставить в сообщение', 3500); }
+      else throw new Error('нет буфера обмена');
+    } catch (e) {
+      // Буфера нет — показываем текст, чтобы можно было выделить руками.
+      openJournal();
+      const box = $('#jrnEvents');
+      if (box) { box.textContent = text; box.style.whiteSpace = 'pre-wrap'; }
+      toast('Скопировать не дали — текст показан в журнале, выделите и скопируйте', 5000);
+    }
+  };
+  if ($('#btnVoiceCheck')) $('#btnVoiceCheck').onclick = async (e) => {
+    const b = e.currentTarget, label = b.textContent;
+    b.disabled = true; b.textContent = 'Говорю…';
+    try { await runVoiceCheck(false); } finally { b.disabled = false; b.textContent = label; }
+  };
+  if ($('#btnWarmVoice')) $('#btnWarmVoice').onclick = async (e) => {
+    const b = e.currentTarget, label = b.textContent;
+    b.disabled = true; b.textContent = 'Грею…';
+    try { const r = await runVoiceCheck(true); toast(r.ok ? 'Голос прогрет — страницы будут читаться сразу' : 'Прогрев не прошёл: ' + (r.error || 'нет старта'), 4000); }
+    finally { b.disabled = false; b.textContent = label; }
+  };
+  if ($('#btnVoiceReport')) $('#btnVoiceReport').onclick = () => { openJournal(); };
   // Шторку НЕ закрываем: иначе не видно, что происходит, и результат некуда
   // показать. Сканируем ту страницу, чей текст открыт (Reader.textPage), а не
   // «текущую в ленте» — из-за этого раньше реплики не перезаписывались вовсе.
@@ -14256,6 +14612,79 @@ async function checkAppUpdate() {
 }
 try { if (typeof window !== 'undefined') window.checkAppUpdate = checkAppUpdate; } catch (e) {}
 
+
+/* ── ЖУРНАЛ: отрисовка и кнопки ─────────────────────────────────────────── */
+function renderJournal() {
+  const box = $('#jrnEvents');
+  const cnt = $('#jrnCount');
+  if (!box) return;
+  const ev = Journal.events.slice(-200).reverse();
+  if (cnt) cnt.textContent = '· всего ' + Journal.events.length;
+  const colorOf = (cat) => (/голос/i.test(cat) ? '#b9a8ff'
+    : /ошибк|обрыв|проглот/i.test(cat) ? '#ff9c9c'
+      : /распозна/i.test(cat) ? '#8fe0b0'
+        : /обновлен/i.test(cat) ? '#ffd479' : '#93a0b8');
+  box.innerHTML = ev.length
+    ? ev.map(e => `<div style="padding:3px 0;border-bottom:1px solid #1c2130">`
+      + `<span style="color:#68738a">${escapeHtml(e.t)}</span> `
+      + `<span style="color:${colorOf(e.cat)}">${escapeHtml(e.cat)}</span> · `
+      + `${escapeHtml(e.text)}</div>`).join('')
+    : '<div class="hint">Пока пусто: событий ещё не было.</div>';
+  const known = $('#jrnKnown');
+  if (known) {
+    const badge = (st) => st === 'fixed'
+      ? '<span style="color:#8fe0b0;font-size:11.5px">исправлено</span>'
+      : st === 'open' ? '<span style="color:#ffd479;font-size:11.5px">открыто</span>'
+        : '<span style="color:#93a0b8;font-size:11.5px">под наблюдением</span>';
+    known.innerHTML = Journal.known.map(k =>
+      `<div style="padding:9px 0;border-bottom:1px solid #1c2130">`
+      + `<div style="font-weight:600;font-size:13.5px">${escapeHtml(k.title)} ${badge(k.status)}`
+      + (k.since && k.since !== '—' ? ` <span class="hint">· ${escapeHtml(k.since)}</span>` : '') + `</div>`
+      + (k.check ? `<div class="hint" style="margin-top:4px"><b>Как проверить:</b> ${escapeHtml(k.check)}</div>` : '')
+      + (k.fix ? `<div class="hint" style="margin-top:2px"><b>Что делать:</b> ${escapeHtml(k.fix)}</div>` : '')
+      + (k.more ? `<div class="hint" style="margin-top:2px">${escapeHtml(k.more)}</div>` : '')
+      + `</div>`).join('');
+  }
+}
+function openJournal() {
+  openSheet('sheetJournal');
+  renderJournal();
+}
+/** Состояние синтеза: показываем в «Движок и модели» числами. */
+async function renderVoiceState(extra) {
+  const el = $('#voiceState');
+  if (!el) return;
+  const last = TTS.lastCheck || null;
+  const bits = [];
+  bits.push(VOICE.available() ? ('движок: ' + VOICE.kind()) : 'синтеза речи в этой среде нет');
+  try { bits.push('голосов: ' + VOICE.voices().length); } catch (e) { /* ignore */ }
+  if (last) {
+    bits.push(last.ok ? 'проверен' : 'ПРОВЕРКА НЕ ПРОШЛА');
+    if (last.started) bits.push('старт ' + (last.startMs || 0) + ' мс');
+    if (last.ended) bits.push('звучал ' + (last.ms / 1000).toFixed(1) + ' с');
+    if (last.error) bits.push('ошибка: ' + last.error);
+    bits.push('в ' + (TTS.lastCheckAt || ''));
+  } else {
+    bits.push('автопроверка ещё не проходила');
+  }
+  if (extra) bits.push(extra);
+  el.textContent = bits.join(' · ');
+}
+async function runVoiceCheck(silent) {
+  TTS.prewarm();
+  try { TTS.prime(); } catch (e) { /* ignore */ }
+  const r = await ttsSelfTest({ silent: !!silent });
+  TTS.lastCheck = r;
+  TTS.lastCheckAt = new Date().toLocaleTimeString('ru-RU');
+  await renderVoiceState();
+  if (!silent) {
+    toast(r.ok ? 'Голос работает: ' + (r.ms / 1000).toFixed(1) + ' с · старт ' + (r.startMs || 0) + ' мс'
+      : 'Голос молчит: ' + (r.error || 'нет старта') + '. Смотрите журнал.', 8000);
+  }
+  return r;
+}
+try { if (typeof window !== 'undefined') { window.renderJournal = renderJournal; window.runVoiceCheck = runVoiceCheck; } } catch (e) {}
+
 (async function boot() {
   // Каждый шаг запуска отдельно. 28.10 на телефоне первый же вызов голоса
   // (`speechSynthesis` в WebView не существует) обрывал весь boot: не грузились
@@ -14270,6 +14699,32 @@ try { if (typeof window !== 'undefined') window.checkAppUpdate = checkAppUpdate;
   // разблокировку — на первом касании экрана. Просьба 06.11, 12:22: «до
   // открытия книги уже держи tts включённым, чтобы задержка была поменьше».
   try { if (typeof TTS !== 'undefined' && TTS.prewarm) TTS.prewarm(); } catch (e) { /* не критично */ }
+  // АВТОПРОВЕРКА ГОЛОСА ПРИ ЗАПУСКЕ (просьба 06.11, 17:05: «сделай при запуске в
+  // настройках проверить tts: он подтянется, а потом на страницах будет шустрый»).
+  // Проверка тихая: одно короткое слово почти без громкости. Она поднимает
+  // движок и список голосов заранее, результат пишется в журнал и в настройки.
+  try {
+    const runStartCheck = async () => {
+      if (TTS._startChecked) return;          // одна автопроверка за сеанс
+      TTS._startChecked = true;
+      try { await Journal.init(); } catch (e) { /* ignore */ }
+      try {
+        const r = await runVoiceCheck(true);
+        TTS.lastCheck = r;
+        TTS.lastCheckAt = new Date().toLocaleTimeString('ru-RU');
+        await renderVoiceState();
+      } catch (e) { Journal.add('голос', 'автопроверка не удалась: ' + (e && e.message ? e.message : e)); }
+    };
+    // Первый жест человека = разрешение на озвучку. Раньше ждём его, потом проверяем.
+    const once = () => {
+      document.removeEventListener('pointerdown', once, true);
+      document.removeEventListener('touchstart', once, true);
+      setTimeout(runStartCheck, 300);
+    };
+    document.addEventListener('pointerdown', once, true);
+    document.addEventListener('touchstart', once, true);
+    setTimeout(runStartCheck, 4000);      // на случай, если жестов не будет (стенд/автотест)
+  } catch (e) { /* не критично */ }
   // Сверка версии с сервером: чтобы «обновил страницу, а баги те же» больше не
   // случалось (старая сборка из кеша service worker).
   try {

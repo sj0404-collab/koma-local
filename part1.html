@@ -557,6 +557,7 @@
     <button class="btn" id="btnMoreModels" style="width:100%;justify-content:center">Движок и модели</button>
     <button class="btn" id="btnMoreRules" style="width:100%;margin-top:8px;justify-content:center">Правила чтения</button>
     <button class="btn" id="btnMoreImport" style="width:100%;margin-top:8px;justify-content:center">Добавить главу</button>
+    <button class="btn" id="btnMoreJournal" style="width:100%;margin-top:8px;justify-content:center">Журнал и неполадки</button>
     <div class="hint" id="moreAbout" style="margin-top:16px"></div>
   </div></div>
 </section>
@@ -665,10 +666,19 @@
       <button class="btn" id="btnPickModelDir">Папка с моделями</button>
       <button class="btn" id="btnTestEngine">Проверить движок</button>
       <button class="btn" id="btnTestVoice">Проверить голос</button>
+      <button class="btn" id="btnWarmVoice">Прогреть голос</button>
       <button class="btn" id="btnPickDict">Словарь ru_250k</button>
     </div>
     <div class="row" style="margin-top:8px;gap:8px">
       <button class="btn" id="btnClearModels">Убрать модели</button>
+    </div>
+    <!-- ГОЛОС: состояние синтеза речи и его проверка. Проверка идёт и сама при
+         запуске — чтобы первая реплика на странице не ждала холодного старта. -->
+    <div class="lbl">ГОЛОС (СИНТЕЗ РЕЧИ)</div>
+    <div class="kv" id="voiceState">проверяю…</div>
+    <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn" id="btnVoiceCheck">Проверить TTS</button>
+      <button class="btn" id="btnVoiceReport">В журнал</button>
     </div>
     <!-- Нативное распознавание: видно ТОЛЬКО внутри АПК. Модели там лежат
          в приложении, считает ONNX Runtime для Android — без WASM и без 11 МБ
@@ -741,6 +751,7 @@
     <div class="hint">Ключ — что вернул OCR, значение — как надо. Сравнение без регистра.</div>
     <textarea id="wordFixesBox" rows="4" placeholder='{"Пвтор":"Автор","Форирование":"Формирование"}'></textarea>
     <button class="btn" id="btnWordFixesSave" style="margin-top:8px">Сохранить правки</button>
+    <button class="btn" id="btnOpenJournal" style="margin-top:10px;width:100%">Журнал: что случилось и как лечить</button>
     <button class="btn" id="closeSheets2" style="margin-top:18px;width:100%">Закрыть</button>
   </div>
 </div>
@@ -901,6 +912,25 @@
 </div>
 
 <!-- ═══ Шторка: текст страницы ═══ -->
+<!-- ═══ Шторка: журнал (события приложения + список известных неполадок) ═══ -->
+<div class="sheet" id="sheetJournal">
+  <div class="head">Журнал</div>
+  <div class="body">
+    <div class="hint">Здесь два списка: <b>события</b> — что приложение делало и на чём спотыкалось
+      (голос, распознавание, обновления), и <b>неполадки</b> — что вообще может случиться,
+      как это проверить и как лечить. Если что-то не работает — пришлите кусок событий.</div>
+    <div class="lbl">СОБЫТИЯ <span id="jrnCount" class="hint"></span></div>
+    <div id="jrnEvents" style="max-height:260px;overflow:auto;font-size:12.5px;line-height:1.45"></div>
+    <div class="row" style="gap:8px;margin-top:10px">
+      <button class="btn" id="btnJrnCopy">Скопировать</button>
+      <button class="btn" id="btnJrnClear">Очистить</button>
+    </div>
+    <div class="lbl">НЕПОЛАДКИ И КАК ИХ ЛЕЧИТЬ</div>
+    <div id="jrnKnown"></div>
+    <button class="btn" id="closeSheets6" style="margin-top:18px;width:100%">Закрыть</button>
+  </div>
+</div>
+
 <div class="sheet" id="sheetText">
   <div class="head" id="textTitle">Текст страницы</div>
   <div class="body">

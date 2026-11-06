@@ -473,6 +473,36 @@ function bindUI() {
   $('#btnOcr2').onclick = openTextSheet;
   $('#btnSettings').onclick = () => { openSheet('sheetSettings'); syncSettingsUI(); };
   $('#btnMore').onclick = () => { openSheet('sheetRules'); renderRulesInfo(); renderBufferSheet(); };
+  // Журнал: и с экрана «Ещё», и из шторки правил, и из настроек движка.
+  if ($('#btnMoreJournal')) $('#btnMoreJournal').onclick = () => openJournal();
+  if ($('#btnOpenJournal')) $('#btnOpenJournal').onclick = () => openJournal();
+  if ($('#closeSheets6')) $('#closeSheets6').onclick = closeSheets;
+  if ($('#btnJrnClear')) $('#btnJrnClear').onclick = () => { Journal.clear(); renderJournal(); toast('Журнал очищен', 2000); };
+  if ($('#btnJrnCopy')) $('#btnJrnCopy').onclick = async () => {
+    const text = Journal.asText();
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(text); toast('Журнал скопирован — можно вставить в сообщение', 3500); }
+      else throw new Error('нет буфера обмена');
+    } catch (e) {
+      // Буфера нет — показываем текст, чтобы можно было выделить руками.
+      openJournal();
+      const box = $('#jrnEvents');
+      if (box) { box.textContent = text; box.style.whiteSpace = 'pre-wrap'; }
+      toast('Скопировать не дали — текст показан в журнале, выделите и скопируйте', 5000);
+    }
+  };
+  if ($('#btnVoiceCheck')) $('#btnVoiceCheck').onclick = async (e) => {
+    const b = e.currentTarget, label = b.textContent;
+    b.disabled = true; b.textContent = 'Говорю…';
+    try { await runVoiceCheck(false); } finally { b.disabled = false; b.textContent = label; }
+  };
+  if ($('#btnWarmVoice')) $('#btnWarmVoice').onclick = async (e) => {
+    const b = e.currentTarget, label = b.textContent;
+    b.disabled = true; b.textContent = 'Грею…';
+    try { const r = await runVoiceCheck(true); toast(r.ok ? 'Голос прогрет — страницы будут читаться сразу' : 'Прогрев не прошёл: ' + (r.error || 'нет старта'), 4000); }
+    finally { b.disabled = false; b.textContent = label; }
+  };
+  if ($('#btnVoiceReport')) $('#btnVoiceReport').onclick = () => { openJournal(); };
   // Шторку НЕ закрываем: иначе не видно, что происходит, и результат некуда
   // показать. Сканируем ту страницу, чей текст открыт (Reader.textPage), а не
   // «текущую в ленте» — из-за этого раньше реплики не перезаписывались вовсе.
@@ -1139,6 +1169,79 @@ async function checkAppUpdate() {
 }
 try { if (typeof window !== 'undefined') window.checkAppUpdate = checkAppUpdate; } catch (e) {}
 
+
+/* ── ЖУРНАЛ: отрисовка и кнопки ─────────────────────────────────────────── */
+function renderJournal() {
+  const box = $('#jrnEvents');
+  const cnt = $('#jrnCount');
+  if (!box) return;
+  const ev = Journal.events.slice(-200).reverse();
+  if (cnt) cnt.textContent = '· всего ' + Journal.events.length;
+  const colorOf = (cat) => (/голос/i.test(cat) ? '#b9a8ff'
+    : /ошибк|обрыв|проглот/i.test(cat) ? '#ff9c9c'
+      : /распозна/i.test(cat) ? '#8fe0b0'
+        : /обновлен/i.test(cat) ? '#ffd479' : '#93a0b8');
+  box.innerHTML = ev.length
+    ? ev.map(e => `<div style="padding:3px 0;border-bottom:1px solid #1c2130">`
+      + `<span style="color:#68738a">${escapeHtml(e.t)}</span> `
+      + `<span style="color:${colorOf(e.cat)}">${escapeHtml(e.cat)}</span> · `
+      + `${escapeHtml(e.text)}</div>`).join('')
+    : '<div class="hint">Пока пусто: событий ещё не было.</div>';
+  const known = $('#jrnKnown');
+  if (known) {
+    const badge = (st) => st === 'fixed'
+      ? '<span style="color:#8fe0b0;font-size:11.5px">исправлено</span>'
+      : st === 'open' ? '<span style="color:#ffd479;font-size:11.5px">открыто</span>'
+        : '<span style="color:#93a0b8;font-size:11.5px">под наблюдением</span>';
+    known.innerHTML = Journal.known.map(k =>
+      `<div style="padding:9px 0;border-bottom:1px solid #1c2130">`
+      + `<div style="font-weight:600;font-size:13.5px">${escapeHtml(k.title)} ${badge(k.status)}`
+      + (k.since && k.since !== '—' ? ` <span class="hint">· ${escapeHtml(k.since)}</span>` : '') + `</div>`
+      + (k.check ? `<div class="hint" style="margin-top:4px"><b>Как проверить:</b> ${escapeHtml(k.check)}</div>` : '')
+      + (k.fix ? `<div class="hint" style="margin-top:2px"><b>Что делать:</b> ${escapeHtml(k.fix)}</div>` : '')
+      + (k.more ? `<div class="hint" style="margin-top:2px">${escapeHtml(k.more)}</div>` : '')
+      + `</div>`).join('');
+  }
+}
+function openJournal() {
+  openSheet('sheetJournal');
+  renderJournal();
+}
+/** Состояние синтеза: показываем в «Движок и модели» числами. */
+async function renderVoiceState(extra) {
+  const el = $('#voiceState');
+  if (!el) return;
+  const last = TTS.lastCheck || null;
+  const bits = [];
+  bits.push(VOICE.available() ? ('движок: ' + VOICE.kind()) : 'синтеза речи в этой среде нет');
+  try { bits.push('голосов: ' + VOICE.voices().length); } catch (e) { /* ignore */ }
+  if (last) {
+    bits.push(last.ok ? 'проверен' : 'ПРОВЕРКА НЕ ПРОШЛА');
+    if (last.started) bits.push('старт ' + (last.startMs || 0) + ' мс');
+    if (last.ended) bits.push('звучал ' + (last.ms / 1000).toFixed(1) + ' с');
+    if (last.error) bits.push('ошибка: ' + last.error);
+    bits.push('в ' + (TTS.lastCheckAt || ''));
+  } else {
+    bits.push('автопроверка ещё не проходила');
+  }
+  if (extra) bits.push(extra);
+  el.textContent = bits.join(' · ');
+}
+async function runVoiceCheck(silent) {
+  TTS.prewarm();
+  try { TTS.prime(); } catch (e) { /* ignore */ }
+  const r = await ttsSelfTest({ silent: !!silent });
+  TTS.lastCheck = r;
+  TTS.lastCheckAt = new Date().toLocaleTimeString('ru-RU');
+  await renderVoiceState();
+  if (!silent) {
+    toast(r.ok ? 'Голос работает: ' + (r.ms / 1000).toFixed(1) + ' с · старт ' + (r.startMs || 0) + ' мс'
+      : 'Голос молчит: ' + (r.error || 'нет старта') + '. Смотрите журнал.', 8000);
+  }
+  return r;
+}
+try { if (typeof window !== 'undefined') { window.renderJournal = renderJournal; window.runVoiceCheck = runVoiceCheck; } } catch (e) {}
+
 (async function boot() {
   // Каждый шаг запуска отдельно. 28.10 на телефоне первый же вызов голоса
   // (`speechSynthesis` в WebView не существует) обрывал весь boot: не грузились
@@ -1153,6 +1256,32 @@ try { if (typeof window !== 'undefined') window.checkAppUpdate = checkAppUpdate;
   // разблокировку — на первом касании экрана. Просьба 06.11, 12:22: «до
   // открытия книги уже держи tts включённым, чтобы задержка была поменьше».
   try { if (typeof TTS !== 'undefined' && TTS.prewarm) TTS.prewarm(); } catch (e) { /* не критично */ }
+  // АВТОПРОВЕРКА ГОЛОСА ПРИ ЗАПУСКЕ (просьба 06.11, 17:05: «сделай при запуске в
+  // настройках проверить tts: он подтянется, а потом на страницах будет шустрый»).
+  // Проверка тихая: одно короткое слово почти без громкости. Она поднимает
+  // движок и список голосов заранее, результат пишется в журнал и в настройки.
+  try {
+    const runStartCheck = async () => {
+      if (TTS._startChecked) return;          // одна автопроверка за сеанс
+      TTS._startChecked = true;
+      try { await Journal.init(); } catch (e) { /* ignore */ }
+      try {
+        const r = await runVoiceCheck(true);
+        TTS.lastCheck = r;
+        TTS.lastCheckAt = new Date().toLocaleTimeString('ru-RU');
+        await renderVoiceState();
+      } catch (e) { Journal.add('голос', 'автопроверка не удалась: ' + (e && e.message ? e.message : e)); }
+    };
+    // Первый жест человека = разрешение на озвучку. Раньше ждём его, потом проверяем.
+    const once = () => {
+      document.removeEventListener('pointerdown', once, true);
+      document.removeEventListener('touchstart', once, true);
+      setTimeout(runStartCheck, 300);
+    };
+    document.addEventListener('pointerdown', once, true);
+    document.addEventListener('touchstart', once, true);
+    setTimeout(runStartCheck, 4000);      // на случай, если жестов не будет (стенд/автотест)
+  } catch (e) { /* не критично */ }
   // Сверка версии с сервером: чтобы «обновил страницу, а баги те же» больше не
   // случалось (старая сборка из кеша service worker).
   try {
