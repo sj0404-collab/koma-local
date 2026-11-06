@@ -1075,9 +1075,17 @@ const Journal = {
   /** Известные неполадки. status: fixed — исправлено, watch — под наблюдением, open — открыто. */
   known: [
     {
+      id: 'frame-not-covering-bubble',
+      title: 'Рамка накрыла одну строку из нескольких, второй строки нет и в «как распознано»',
+      status: 'watch', since: 'v1.9.97',
+      check: 'В журнале найдите строку «детекция WxH: боксов N, распознано строк M (отброшено K)». Если K > 0 — строки отбросило распознавание, если строк меньше, чем видно, а K = 0 — детектор не нашёл блок.',
+      fix: 'Порог уверенности снижен до 0,22; внутри каждой найденной рамки теперь проверяются ВСЕ текстовые строки, а не только первая, и непрочитанная строка дописывается в ту же реплику (сверху — перед, снизу — после). Ограничитель роста рамки берётся как максимум из доли высоты и доли ширины, поэтому тонкая одно-строчная рамка дорастает до своего блока.',
+      more: 'Чего это НЕ делает: если детектор отдал бокс только на одну строку, весь пузырь по нему не восстановить — тут поможет двойной тап по облачку.',
+    },
+    {
       id: 'line-reread-gesture',
       title: 'Реплика распознана не целиком («НОНО» вместо «ПОНЯТНО»)',
-      status: 'watch', since: 'v1.9.96',
+      status: 'watch', since: 'v1.9.97',
       check: 'Дважды коснитесь рамки этой реплики на странице. В журнале появится «реплика перечитана вручную: было → стало».',
       fix: 'Двойной тап вырезает облачко из страницы, увеличивает его и распознаёт отдельно от полосы, затем расширяет рамку до всех найденных строк и читает вслух. Строки, обрезанные краем полосы, теперь перечитываются и сами — в проходе распознавания.',
       more: 'Если и после двойного тапа текст тот же и неверный — пришлите строку из журнала: значит движок не читает этот шрифт, и это уже про модель, а не про конвейер.',
@@ -1085,7 +1093,7 @@ const Journal = {
     {
       id: 'voice-first-only',
       title: 'Голос читает только первую реплику, дальше «страница дочитана»',
-      status: 'fixed', since: 'v1.9.96–1.9.92',
+      status: 'fixed', since: 'v1.9.97–1.9.92',
       check: 'Нажмите ▶ на полосе с 2–3 репликами. В журнале должно быть по строке «озвучка … с» на КАЖДУЮ реплику.',
       fix: 'Читалка больше не отменяет речь перед каждой фразой, колбэки прошлой фразы не могут двигать очередь, оборванная фраза повторяется один раз.',
       more: 'Если повторится — в журнале будет «оборвана, повтор» или «движок не начал фразу». Пришлите эти строки.',
@@ -1241,7 +1249,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.96';
+const VERSION = 'v1.9.97';
 
 /* Формат сохранённого текста (не версия сборки!).
    Раньше буфер распознанного текста привязывался к VERSION, и КАЖДОЕ
@@ -2287,7 +2295,7 @@ const DEFAULT_RULES = {
   inkCoefficient: 0.45, inkMin: 40, inkMax: 235, binarizeFallback: 110,
   inkTileRows: 4, inkLevels: 1,
   contrastGain: 2.2, contrastOffset: -140,
-  rescueMinRegions: 600, pageSide: 1600, rescueSide: 960, minConfidence: 0.25,
+  rescueMinRegions: 600, pageSide: 1600, rescueSide: 960, minConfidence: 0.22,
   cutMargin: 0.06, bandOverlap: 0, bandsMax: 8, wholeThreshold: 0.72,
   bubbleGap: 0.45, mergeHeightRatio: 1.8,
   speechRate: 0, autoScrollStep: 0.25, semiManual: false, semiManualSettleMs: 700,
@@ -6641,55 +6649,153 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   // нарисованном прямоугольнике нет ни одной прочитанной строки, читаем его
   // принудительно (кроп с полями, без порога уверенности). Именно так терялось
   // «ПОНЯТНО.» в облачке: движок нашёл блок, но строку отбросил по уверенности.
+  // ── Рамка дорастает до контура пузыря (две РАЗНЫЕ причины, обе замерены) ──
+  //
+  // Причина 1: рамка тонкой реплики не дорастала до облачка. Ограничитель роста
+  // считался как доля ВЫСОТЫ региона, а у одно-строчного региона она мизерная
+  // (34 px при нужных 150) — рамка накрывала только первую строку, вторая
+  // оставалась «без рамки» и в реплику не попадала (снимок 06.11, 19:37:
+  // «НЕ УВЕРЕН» и вторая строка под ним). Теперь ограничитель берётся как
+  // МАКСИМУМ из доли высоты и доли ширины — тонкий, но широкий регион
+  // дорастает до контура пузыря.
+  //
+  // Причина 2: часть строк облачка вообще не распознавалась — их не было даже
+  // в «как распознано». Раньше рамка считалась «закрытой», если в ней нашлась
+  // ХОТЬ ОДНА строка, и остальные строки того же пузыря просто не читались.
+  // Теперь внутри каждой найденной рамки проверяются ВСЕ текстовые строки и
+  // читаются те, которых ещё нет.
   if (R.boxCoverage !== false) {
-    const covered = (b) => {
-      const L = b.left / W, Rt = b.right / W;
-      const T = (y0 + b.top) / imgCanvas.height, B = (y0 + b.bottom) / imgCanvas.height;
-      return regions.some(r => {
-        const ox = Math.min(r.right, Rt) - Math.max(r.left, L);
-        const oy = Math.min(r.bottom, B) - Math.max(r.top, T);
-        return ox > 0 && oy > 0;
-      });
+    const padOf = (b) => Math.max(4, Math.round((b.bottom - b.top) * 0.2));
+    const asFrac = (ln) => ({
+      left: ln.left / W, right: ln.right / W,
+      top: (y0 + ln.top) / imgCanvas.height, bottom: (y0 + ln.bottom) / imgCanvas.height,
+    });
+    const overlaps = (a, b, share = 0.35) => {
+      const ox = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+      const oy = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+      return ox > Math.min(a.right - a.left, b.right - b.left) * share && oy > 0;
+    };
+    const readRow = async (ln) => {
+      try {
+        const wide = (ln.right - ln.left) / W >= 0.25;
+        const got = await decodeLine(src, ln, wide, { skipExt: true });
+        const text = String((got && got.text) || '').trim();
+        if ((text.match(/\p{L}/gu) || []).length < 2) return null;
+        if (typeof looksLikeJunkLine === 'function' && looksLikeJunkLine(text, R)) return null;
+        if (typeof Words !== 'undefined' && Words && Words.ready) {
+          const first = (text.match(/[А-Яа-яЁёA-Za-z]{2,}/) || [''])[0].toLowerCase();
+          if (!first || !(Words.isKnown(first) || Words.inDict(first))) return null;
+        }
+        return { text, conf: (got && got.conf) || 0 };
+      } catch (e) { return null; }
     };
     for (const b of det.boxes) {
-      if (covered(b)) continue;
-      try {
-        const pad = Math.max(4, Math.round((b.bottom - b.top) * 0.2));
-        const box2 = {
-          left: Math.max(0, b.left - pad), right: Math.min(src.width, b.right + pad),
-          top: Math.max(0, b.top - pad), bottom: Math.min(src.height, b.bottom + pad),
-        };
-        for (const ln of textLines(src, box2, R)) {
-          if (!visible(ln)) continue;
-          // Рамка, которая заметно выше строки, — это рисунок/декор, а не
-          // облачко: принудительное чтение такой рамки давало мусор
-          // («plo», «е риооорн …», проверка на Mieruko).
-          if ((b.bottom - b.top) > Math.max(4, (ln.bottom - ln.top)) * 3.2) continue;
-          const wide = (ln.right - ln.left) / W >= 0.25;
-          const got = await decodeLine(src, ln, wide, { skipExt: true });
-          const text = String((got && got.text) || '').trim();
-          if ((text.match(/\p{L}/gu) || []).length < 2) continue;
-          if (typeof looksLikeJunkLine === 'function' && looksLikeJunkLine(text, R)) continue;
-          // Первое слово должно быть настоящим: строка, начавшаяся с обрывка
-          // («е риооорн …»), — это кусок декора, а не реплика.
-          if (typeof Words !== 'undefined' && Words && Words.ready) {
-            const first = (text.match(/[А-Яа-яЁёA-Za-z]{2,}/) || [''])[0].toLowerCase();
-            if (!first || !(Words.isKnown(first) || Words.inDict(first))) continue;
-          }
+      const pad = padOf(b);
+      const box2 = {
+        left: Math.max(0, b.left - pad), right: Math.min(src.width, b.right + pad),
+        top: Math.max(0, b.top - pad), bottom: Math.min(src.height, b.bottom + pad),
+      };
+      let rows = [];
+      try { rows = textLines(src, box2, R); } catch (e) { rows = []; }
+      if (!rows.length) continue;
+      const rowH = rows.reduce((acc, ln) => acc + (ln.bottom - ln.top), 0) / rows.length;
+      // Рамка, заметно выше строки, — это рисунок/декор, а не облачко. Для
+      // многострочных облачков допуск выше: именно там терялась вторая строка.
+      const allow = rows.length >= 2 ? 6.0 : 3.2;
+      if ((b.bottom - b.top) > Math.max(4, rowH) * allow) continue;
+      const inside = regions.filter(r => overlaps(r, asFrac(box2), 0.5));
+      const unread = rows.filter(ln => {
+        const f = asFrac(ln);
+        return visible(ln) && !regions.some(r => overlaps(r, f, 0.45));
+      });
+      if (!unread.length) continue;
+      if (!inside.length) {
+        // Пустая рамка: читаем первую осмысленную строку, как раньше.
+        for (const ln of unread.slice(0, 1)) {
+          const got = await readRow(ln);
+          if (!got) continue;
+          const f = asFrac(ln);
           regions.push({
-            text,
-            left: ln.left / W, top: (y0 + ln.top) / imgCanvas.height,
-            right: ln.right / W, bottom: (y0 + ln.bottom) / imgCanvas.height,
-            confidence: (got && got.conf) || 0,
-            box: {
-              left: b.left / W, top: (y0 + b.top) / imgCanvas.height,
-              right: b.right / W, bottom: (y0 + b.bottom) / imgCanvas.height,
-            },
+            text: got.text, ...f, confidence: got.conf,
+            box: { left: b.left / W, top: (y0 + b.top) / imgCanvas.height,
+                   right: b.right / W, bottom: (y0 + b.bottom) / imgCanvas.height },
             fromEmptyBox: true,
           });
-          break;                     // одной строки из рамки достаточно
+          break;
         }
-      } catch (e) { /* не обязано получиться */ }
+        continue;
+      }
+      // В рамке уже есть реплика, но не все её строки прочитаны. Это ДРУГАЯ
+      // причина потери (снимок 19:37: «НЕ УВЕРЕН» — одна строка, вторая без
+      // рамки и без текста). Дописываем такие строки В ТУ ЖЕ реплику, а не
+      // отдельной: иначе одна реплика выходит двумя (это запрещено).
+      for (const ln of unread.slice(0, 2)) {
+        const f = asFrac(ln);
+        // Строка — продолжение: перекрывается по ширине и стоит плотно.
+        const host = inside
+          .filter(r => {
+            const ox = Math.min(r.right, f.right) - Math.max(r.left, f.left);
+            if (ox <= Math.min(r.right - r.left, f.right - f.left) * 0.25) return false;
+            const gap = Math.max(0, Math.max(r.top, f.top) - Math.min(r.bottom, f.bottom));
+            const gapLimit = (rowH / Math.max(1, imgCanvas.height)) * 1.2;
+            return gap <= gapLimit;
+          })
+          .sort((a, b2) => Math.abs(a.top - f.top) - Math.abs(b2.top - f.top))[0];
+        if (!host) continue;
+        const got = await readRow(ln);
+        if (!got) continue;
+        const above = f.top < host.top;
+        // Текст дописываем в порядке страницы: сверху — перед, снизу — после.
+        const add = String(got.text || '').trim();
+        host.text = above ? (add + ' ' + host.text) : (host.text + ' ' + add);
+        host.text = host.text.replace(/\s+/g, ' ').trim();
+        host.top = Math.min(host.top, f.top);
+        host.bottom = Math.max(host.bottom, f.bottom);
+        host.left = Math.min(host.left, f.left);
+        host.right = Math.max(host.right, f.right);
+        host.mergedRows = (host.mergedRows || 0) + 1;
+        delete host.key;
+      }
+    }
+  }
+
+  // Рамка каждой реплики дорастает до контура своего пузыря.
+  const grownLog = [];
+  if (R.growToBubble !== false && Array.isArray(det.boxes) && det.boxes.length && regions.length) {
+    const pageBoxes = det.boxes.map(b => ({
+      left: b.left / W, top: (y0 + b.top) / imgCanvas.height,
+      right: b.right / W, bottom: (y0 + b.bottom) / imgCanvas.height,
+    }));
+    const area = (r) => Math.max(0, r.right - r.left) * Math.max(0, r.bottom - r.top);
+    for (const r of regions) {
+      const rH = Math.max(r.bottom - r.top, 1e-6), rW = Math.max(r.right - r.left, 1e-6);
+      let best = null, bestShare = 0;
+      for (const b of pageBoxes) {
+        const ox = Math.min(r.right, b.right) - Math.max(r.left, b.left);
+        const oy = Math.min(r.bottom, b.bottom) - Math.max(r.top, b.top);
+        if (ox <= 0 || oy <= 0) continue;
+        const share = (ox * oy) / area(r);
+        if (share > bestShare) { bestShare = share; best = b; }
+      }
+      if (!best || bestShare < 0.6) continue;                  // реплика не в этом пузыре
+      const bH = Math.max(best.bottom - best.top, 1e-6), bW = Math.max(best.right - best.left, 1e-6);
+      if (bH > Math.max(rH * 9, 0.2) || bW > rW * 3.2) continue;   // это панель, а не пузырь
+      // Ограничитель: МАКСИМУМ из доли высоты и доли ширины (см. выше).
+      const limit = Math.max(rH * 3.0, rW * 0.55);
+      const up = Math.max(0, r.top - best.top);
+      const down = Math.max(0, best.bottom - r.bottom);
+      const left = Math.max(0, r.left - best.left);
+      const right = Math.max(0, best.right - r.right);
+      if (R.growLog) { grownLog.push({ t: String(r.text).slice(0, 24), rH: +rH.toFixed(3), rW: +rW.toFixed(3),
+        bH: +bH.toFixed(3), bW: +bW.toFixed(3), limit: +limit.toFixed(3), up: +up.toFixed(3),
+        down: +down.toFixed(3), left: +left.toFixed(3), right: +right.toFixed(3), share: +bestShare.toFixed(2) }); }
+      if (Math.max(up, down) <= limit && Math.max(left, right) <= limit) {
+        r.top = Math.min(r.top, best.top);
+        r.bottom = Math.max(r.bottom, best.bottom);
+        r.left = Math.min(r.left, best.left);
+        r.right = Math.max(r.right, best.right);
+        r.grownToBubble = true;
+      }
     }
   }
 
@@ -6698,6 +6804,7 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
 
   return {
     regions: clean, chrome, boxes: det.boxes.length, unreadBoxes,
+    growLog: R.growLog ? grownLog : undefined,
     ms: Math.round(performance.now() - t0),
     detMs, recMs: Math.round(performance.now() - t1), crops,
     band: band ? { y0, y1 } : null,
@@ -9039,6 +9146,24 @@ const Reader = {
             : `Распознаю ${label} заново…` + (phase ? ' ' + phase : '');
         }
       }, band, opts.det || null);
+      // Журнал: где именно теряется текст. Просьба 06.11, 19:37: «журнал теперь
+      // пишет по каждой странице: детекция WxH: боксов N, распознано строк M
+      // (отброшено K)». По этой строке сразу видно, детектор не нашёл текст или
+      // распознавание отбросило строки по уверенности.
+      try {
+        const bx = Number(res.boxes) || 0;
+        const got = (res.regions || []).length || Number(res.replicas ? res.replicas.length : 0);
+        const dropped = Math.max(0, bx - got);
+        // По каждой странице — одна строка; в тихих проходах пишем только когда
+        // что-то отброшено (иначе журнал забивался предзагрузкой).
+        if (!silent || dropped > 0) {
+          Journal.add('распознавание',
+            'детекция ' + (c.width || 0) + 'x' + (c.height || 0) + ': боксов ' + bx
+            + ', распознано строк ' + got + ' (отброшено ' + dropped + ')'
+            + ' за ' + (Number(res.ms) || 0) + ' мс'
+            + (band ? ' · полоса' : ' · страница'));
+        }
+      } catch (e) { /* журнал не обязателен */ }
       // Своя плашка «Полоса N распознана…» может попасть в кадр (снимок экрана).
       // До сборки реплик её строки отбрасываем: иначе они склеиваются в
       // «реплику» вида «реплик · 6.1 с (детектор 2.5 с, распознавание 3.6 с,

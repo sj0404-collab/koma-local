@@ -11,7 +11,7 @@
    Причина: кеш назывался koma-v1 и жил вечно, а оболочка бралась из кеша.
    Теперь имя кеша содержит версию, оболочка берётся из сети с no-store, а
    старые кеши удаляются при активации новой версии. */
-const CACHE = 'koma-v1.0.31';
+const CACHE = 'koma-v1.0.32';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
