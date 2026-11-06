@@ -2455,6 +2455,7 @@ async function renderTextSheet(i) {
         ? `итого ${(Number(data.ms) || 0) / 1000 < 0.05 ? '?' : ((Number(data.ms) || 0) / 1000).toFixed(1)} с нативно (одним проходом)`
         : `итого ${((Number(data.ms) || 0) / 1000).toFixed(1)} с = детектор ${((Number(data.detMs) || 0) / 1000).toFixed(1)} с `
           + `+ распознавание ${((Number(data.recMs) || 0) / 1000).toFixed(1)} с`)
+      + (Number(data.unreadBoxes) > 0 ? ` · не прочитано блоков: ${data.unreadBoxes}` : '')
       + (data.bands > 1 ? ` · полос: ${data.bands}` : '')
       + (data.detPass && data.detPass !== 'normal'
         ? ' · детектор нашёл со 2-й попытки: ' + ({

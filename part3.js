@@ -3548,8 +3548,17 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   // полосу. По правилу «длинную страницу читать в пределах видимой области»
   // иначе на вебтуне в 8000 px находились реплики на два экрана вперёд.
   let src = imgCanvas;
-  const y0 = band ? Math.max(0, Math.round(band.y0)) : 0;
-  const y1 = band ? Math.min(imgCanvas.height, Math.round(band.y1)) : imgCanvas.height;
+  // Полоса рисуется С ПОЛЯМИ. Раньше кадр был ровно y0…y1, и строка, которую
+  // край экрана разрезал пополам, уезжала в распознавание половинкой:
+  // «ШОЕ СПАСИБО.» вместо «БОЛЬШОЕ СПАСИБО.» (телефон 06.11, 09:16), а строки
+  // выше края терялись целиком. Поля дают модели целые буквы, а видимость
+  // по-прежнему считается по РАМКЕ ЭКРАНА (band.vy0…vy1) — поэтому строка
+  // читается один раз и только в своей полосе.
+  const coreY0 = band ? Math.max(0, Math.round(band.y0)) : 0;
+  const coreY1 = band ? Math.min(imgCanvas.height, Math.round(band.y1)) : imgCanvas.height;
+  const margin = band ? Math.round(Math.min(220, Math.max(48, (coreY1 - coreY0) * 0.06))) : 0;
+  const y0 = band ? Math.max(0, coreY0 - margin) : 0;
+  const y1 = band ? Math.min(imgCanvas.height, coreY1 + margin) : imgCanvas.height;
   const bandH = Math.max(1, y1 - y0);
   if (band && (y0 > 0 || y1 < imgCanvas.height)) {
     const c = makeCanvas(imgCanvas.width, bandH);
@@ -3676,6 +3685,8 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   let largePasses = 0;
 
   const decodeLine = async (canvas, ln, wide, opts) => {
+    // opts.softR — правила для мягкого повтора (без обрезки полей кропа).
+    const sR = (opts && opts.softR) ? { ...R, ...opts.softR } : R;
     const w = Math.max(1, ln.right - ln.left), h = Math.max(1, ln.bottom - ln.top);
     const c = makeCanvas(w, h);
     c.getContext('2d', { willReadFrequently: true })
@@ -3683,7 +3694,7 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     crops++;
     // Перед распознаванием убираем из кропа обрезки соседних строк (см.
     // trimCropToInk): без этого модель читала два текста сразу.
-    const trimmed = R.trimCrop === false ? c : trimCropToInk(c);
+    const trimmed = sR.trimCrop === false ? c : trimCropToInk(c);
     const ckey = _cropKey(trimmed, wide, R);
     const hit = textCacheGet(ckey);
     if (hit) return hit;
@@ -3803,9 +3814,31 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
         onProgress(done + (li + 1) / (lines.length + 1), det.boxes.length);
       await yieldUI();
       const wide = (ln.right - ln.left) / W >= 0.25;   // реплика, а не звук
-      // Край полосы: строка могла быть разрезана границей экрана.
-
+      // Край полосы: строка могла быть разрезана границей экрана. Поля вокруг
+      // полосы (см. margin выше) обычно это закрывают; если строка всё ещё
+      // липнет к краю кадра — дочитываем её кропом, расширенным в сторону
+      // страницы, а не обрезком. Без этого из «БОЛЬШОЕ СПАСИБО.» получалось
+      // «ШОЕ СПАСИБО.» (телефон 06.11, 09:16).
+      const atTop = ln.top <= 2 && y0 > 0;
+      const atBottom = ln.bottom >= src.height - 2 && y1 < imgCanvas.height;
       let { text, conf } = await decodeLine(src, ln, wide);
+      if ((atTop || atBottom) && band) {
+        const w = Math.max(1, ln.right - ln.left);
+        const eh = Math.max(16, Math.round((ln.bottom - ln.top) * 0.5));
+        const pt = Math.max(0, y0 + ln.top - (atTop ? eh : 0));
+        const pb = Math.min(imgCanvas.height, y0 + ln.bottom + (atBottom ? eh : 0));
+        if (pb - pt > 2) {
+          const c = makeCanvas(w, pb - pt);
+          c.getContext('2d', { willReadFrequently: true })
+            .drawImage(imgCanvas, ln.left, pt, w, pb - pt, 0, 0, w, pb - pt);
+          crops++;
+          const trimmed = R.trimCrop === false ? c : trimCropToInk(c);
+          const alt = await decodeBetter(trimmed, R, { wide });
+          if (alt && alt[0] && textScore(alt[0], alt[1]) > textScore(text, conf)) {
+            text = alt[0]; conf = alt[1];
+          }
+        }
+      }
       // Битые слова дочиниваем по одному, верные — не трогаем.
       if (R.breakWords !== false && wide && text && !allWordsKnown(text)) {
         const crop = makeCanvas(Math.max(1, ln.right - ln.left), Math.max(1, ln.bottom - ln.top));
@@ -3881,7 +3914,43 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
       entry.items = alt.items;
     }
   }
-  for (const entry of byBox) for (const item of entry.items) regions.push(item);
+  // ── Проход 1б: блоки, где не прочиталось НИЧЕГО. Раньше такой блок молча
+  // исчезал из реплик: человек видел «3 блоков · 1 строка» и терял облачко
+  // целиком. Пробуем мягче — половинный порог уверенности и кроп без обрезки
+  // полей; берём только то, что похоже на текст (есть буквы, не мусор).
+  const softMin = Math.max(0.06, (Number(R.minConfidence) || 0.25) * 0.5);
+  for (const entry of byBox) {
+    if (entry.items.length) continue;
+    const lines = textLines(src, entry.box, R).filter(visible);
+    for (const ln of lines) {
+      const wide = (ln.right - ln.left) / W >= 0.25;
+      await yieldUI();
+      let { text, conf } = await decodeLine(src, ln, wide, { skipExt: true, softR: { trimCrop: false } });
+      if (!text || !text.trim() || conf <= softMin) continue;
+      if (typeof looksLikeJunkLine === 'function' && looksLikeJunkLine(text, R)) continue;
+      if ((text.match(/\p{L}/gu) || []).length < 2) continue;
+      entry.items.push({
+        text,
+        left: ln.left / W, top: (y0 + ln.top) / imgCanvas.height,
+        right: ln.right / W, bottom: (y0 + ln.bottom) / imgCanvas.height,
+        confidence: conf,
+        soft: true,
+        box: {
+          left: entry.box.left / W, top: (y0 + entry.box.top) / imgCanvas.height,
+          right: entry.box.right / W, bottom: (y0 + entry.box.bottom) / imgCanvas.height,
+        },
+      });
+    }
+  }
+
+  // Сколько найденных блоков осталось без текста: раньше они молча исчезали,
+  // и «3 блоков · 1 строка» выглядело как норма (телефон 06.11).
+  let unreadBoxes = 0;
+  for (const entry of byBox) {
+    const got = entry.items.filter(it => it && it.text && it.text.trim());
+    if (!got.length) unreadBoxes++;
+    for (const item of entry.items) regions.push(item);
+  }
 
   // ── Проход 3: то, что детектор не закрыл боксами. Дешёвый поиск полос с
   // «чернилами» без боксов; если в такой полосе нашлись строки — распознаём.
@@ -3924,7 +3993,7 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   const clean = regions.filter(r => !inChrome(r, chrome));
 
   return {
-    regions: clean, chrome, boxes: det.boxes.length,
+    regions: clean, chrome, boxes: det.boxes.length, unreadBoxes,
     ms: Math.round(performance.now() - t0),
     detMs, recMs: Math.round(performance.now() - t1), crops,
     band: band ? { y0, y1 } : null,
