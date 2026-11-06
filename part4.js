@@ -359,6 +359,17 @@ const Reader = {
     return this.visibleBandPx(i);
   },
 
+  /**
+   * Лента ли это (манхва/вебтун), а не постраничная манга.
+   *
+   * Прямая поправка с телефона 06.11, 18:48: «манхву читаем как ленту
+   * непрерывную на главу, значит там вообще нету страницы, это все страницы
+   * целиком». В ленте делить нечего: глава — один непрерывный поток, и слова
+   * «Страница 3 дочитана, ▶ — следующая» здесь просто неверны: следующей
+   * страницы нет, есть продолжение той же ленты. Конец объявляем только когда
+   * лента кончилась целиком, и это «Глава дочитана».
+   */
+  isStrip() { return this.mode === 'vertical'; },
   visibleBandPx(i) {
     try { return this.visibleBandPxInner(i); } catch (e) { return null; }
   },
@@ -1259,7 +1270,9 @@ const Buffer = {
     // когда-нибудь совпадут по префиксу, чужие строки в чужую страницу не
     // попадут — при чтении сверяем книгу ещё раз.
     const build = (typeof VERSION !== 'undefined') ? VERSION : '';
-    await DB.put('kv', { k: key, v: { page, book: Reader.book.id, at: Date.now(), rules: RULES.version, build, lines } });
+    // textFormat — формат строк, а не номер сборки: см. TEXT_FORMAT в part2.js.
+    const textFormat = (typeof TEXT_FORMAT !== 'undefined') ? TEXT_FORMAT : 0;
+    await DB.put('kv', { k: key, v: { page, book: Reader.book.id, at: Date.now(), rules: RULES.version, build, textFormat, lines } });
   },
   async get(page) {
     const bufRow = await DB.get('kv', 'buf:' + Reader.book.id + ':' + page);
@@ -1298,8 +1311,16 @@ const Buffer = {
     for (const r of rows) {
       const v = r.v;
       if (!v || typeof v.page !== 'number') continue;
-      if (v.build && build && v.build !== build) { stale.push(r.k); continue; }
-      if (v.textBuild && build && v.textBuild !== build) { stale.push(r.k); continue; }
+      // Сверяем ФОРМАТ, а не версию сборки: обновление читалки не должно стирать
+      // готовый текст страниц (журнал 06.11, 18:46:27 и 18:47:08).
+      const fmt = (typeof TEXT_FORMAT !== 'undefined') ? TEXT_FORMAT : 0;
+      const docFmt = Number(v.textFormat || 0);
+      // Запись без метки формата (сделана до 1.9.95) считаем совместимой, если
+      // совпал набор правил чтения: иначе одна установка обнуляла бы весь
+      // накопленный текст просто из-за номера сборки.
+      const sameRules = v.rules === RULES.version;
+      if (docFmt ? docFmt !== fmt : !sameRules) { stale.push(r.k); continue; }
+      const _ = build;  // (поле build осталось только для истории записи)
       fresh.push(v);
     }
     if (stale.length) {
@@ -2375,6 +2396,9 @@ const TTS = {
       // Человек нажал ▶ сам: молча уехать на другую полосу/страницу нельзя —
       // читалка «перепрыгивала», не сказав ни слова (телефон 06.11, 11:34).
       if (!lines.length && fromStart) {
+        // В ленте совет «листните» бессмысленный: листать нечего, глава — одна
+        // лента. Продолжаем с текущего места вниз (жалоба 06.11, 18:47:45).
+        if (Reader.isStrip()) return this.advanceReading();
         toast('На этой полосе непрочитанного текста нет — листните', 4000, true);
         return;
       }
@@ -2394,6 +2418,7 @@ const TTS = {
     this.queue = lines.slice();          // только непрочитанное на этой полосе
     this.stopped = false; this.idx = 0;
     this._softAgain = 0;                 // новый запуск — снова есть право на повтор
+    this._chapterChecked = false;        // контроль конца главы — заново
     Reader.prefetchNext();               // следующая страница — пока слушаем эту
     $('#playBar').style.display = 'flex';
     $('#btnRead').textContent = '⏸';
@@ -2583,8 +2608,18 @@ const TTS = {
           if (!un.length && moved && !this.stopped) {
             try {
               const b2 = Reader.visibleBandPx(page);
-              await Reader.scanPage(page, { bandPx: b2, force: true, silent: true, internal: true, tag: 'догон полосы' });
+              const redone = await Reader.scanPage(page, { bandPx: b2, force: true, silent: true, internal: true, tag: 'догон полосы' });
               un = Reader.unspokenInBand();
+              // Детектор нашёл строки (5–12), а реплик — ноль: распознавание
+              // полосы прошло впустую (журнал 06.11, 18:47:41 «0 реплик, всего
+              // 0 на странице · детектор 2.5 с, распознавание 0.1 с, 5 строк»).
+              // Тогда один раз читаем ЦЕЛУЮ страницу: на второй попытке тот же
+              // участок читался нормально.
+              const seen = Number((redone && (redone.crops || redone.boxes)) || 0);
+              if (!un.length && seen > 0) {
+                await Reader.scanPage(page, { force: true, silent: true, tag: 'целая страница после пустой полосы' });
+                un = Reader.unspokenInBand();
+              }
             } catch (e) { /* не обязано получиться */ }
           }
           if (this.stopped) return;
@@ -2637,7 +2672,12 @@ const TTS = {
         // Сам по себе голос за границу страницы НЕ едет (правило autoPage,
         // по умолчанию выключено). Иначе выходило ровно то, на что пожаловались
         // 4.11: страница 2 дочитана — и без единого нажатия голос уехал на 3-ю.
-        if (!RULES.autoPage) {
+        //
+        // В ленте (манхва) границы страниц нет вообще: файлы книги — это одна
+        // непрерывная глава. Здесь голос обязан ехать дальше сам, иначе человек
+        // жмёт ▶ после каждой «страницы», которой на экране не существует
+        // (жалоба 06.11, 18:48).
+        if (!RULES.autoPage && !Reader.isStrip()) {
           this.stop();
           Reader.page = page;
           toast('Страница ' + (page + 1) + ' дочитана. ▶ — следующая', 4000);
@@ -2682,8 +2722,23 @@ const TTS = {
           page = next;
           continue;
         }
+        // ── Конец главы ───────────────────────────────────────────────────
+        // В ленте перед словом «дочитано» делаем один контрольный проход по
+        // кадру: первый проход полосы бывает неполным (журнал 06.11, 18:47:56
+        // «1 реплик · 6 строк», а через 30 с та же полоса — «3 реплик ·
+        // 19 строк»). Если контроль нашёл новые реплики — читаем их, и только
+        // потом говорим, что глава кончилась.
+        if (Reader.isStrip() && !this._chapterChecked) {
+          this._chapterChecked = true;
+          try {
+            const px = Reader.visibleBandPx(page);
+            await Reader.scanPage(page, { bandPx: px, force: true, silent: true, tag: 'контроль конца главы' });
+            const tail = Reader.unspokenInBand();
+            if (tail.length) { Reader.page = page; return this.readQueue(tail); }
+          } catch (e) { console.warn('контроль конца главы', e); }
+        }
         this.stop();
-        toast('Конец книги', 2500);
+        toast(Reader.isStrip() ? 'Глава дочитана' : 'Конец книги', 2500);
         return;
       }
     } finally {
