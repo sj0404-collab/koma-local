@@ -92,6 +92,8 @@
   #strip canvas,#strip img{display:block;width:100%;height:auto}
   #strip .frames{position:absolute;inset:0;pointer-events:none}
   #strip .frame,#paged .frame{position:absolute;border:1.5px solid var(--orange);border-radius:8px;pointer-events:auto}
+  /* «Найдено, читаю сейчас» — рамки, которые рисуются ДО распознавания */
+  .frames .frame.pending{border:2px dashed #b07dff !important;border-radius:8px !important;background:rgba(160,110,255,.22) !important;box-shadow:0 0 0 1px rgba(40,0,80,.45) inset;pointer-events:none}
   #strip .frame,#paged .frame.done{border-color:#ff8a4c33}
   /* Прочитанное в «Тексте страницы» — видно и помечено, но не спрятано */
   .lineitem .done{color:#8fd18f}

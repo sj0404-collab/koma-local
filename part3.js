@@ -1021,6 +1021,12 @@ function attachLostLines(replicas, rawRegions, medH) {
     // «Tr. 48» снова попадали в чтение).
     if (looksLikeJunkLine(t)) continue;
     if (isTitleOrMarker(t, r, 1, medH || 0)) continue;
+    // Только настоящий текст: первое слово должно быть словарным. Иначе
+    // страховка вытаскивала из кадра обрывки декора («plo», «е риооорн …»).
+    if (typeof Words !== 'undefined' && Words && Words.ready) {
+      const f = (t.match(/[А-Яа-яЁёA-Za-z]{2,}/) || [''])[0].toLowerCase();
+      if (!f || !(Words.isKnown(f) || Words.inDict(f))) continue;
+    }
     lost.push(r);
   }
   if (!lost.length) return list;
@@ -1033,13 +1039,14 @@ function attachLostLines(replicas, rawRegions, medH) {
       const d = Math.abs(mid(l) - mid(r));
       if (d < bestD) { bestD = d; best = l; }
     }
+    // Приклеиваем ТОЛЬКО к соседней реплике. Отдельную реплику из потерянной
+    // строки не создаём: строки вне облачка — обычно декор, и они возвращались
+    // в список как «е риооорн В БУДУЩЕМ…» (проверка на Mieruko).
     if (best && bestD <= 0.05) {
       best.text = mid(r) < mid(best) ? (t + ' ' + best.text) : (best.text + ' ' + t);
       best.top = Math.min(Number(best.top) || 0, Number(r.top) || 0);
       best.bottom = Math.max(Number(best.bottom) || 0, Number(r.bottom) || 0);
       attached++;
-    } else {
-      list.push({ ...r, text: t, attachedLost: true });
     }
   }
   list.sort((a, b) => (Number(a.top) || 0) - (Number(b.top) || 0));
@@ -3157,6 +3164,21 @@ function textScore(text, conf) {
 async function recognizeFirstBubble(src, R, band, preDet) {
   try {
     const det = preDet || await detectWithRetry(src, R);
+  // ── СНАЧАЛА РАМКИ, ПОТОМ РАСПОЗНАВАНИЕ ───────────────────────────────────
+  // Просьба с телефона 06.11, 10:58: показать, что найдено, ДО распознавания —
+  // чтобы потеря строки была видна сразу, а не по пропавшему слову в реплике.
+  // Страница рисует прямоугольники по этому вызову и успевает их отрисовать
+  // (yieldUI ниже), потому что декодирование начинается только после него.
+  if (typeof R.onBoxes === 'function' && det.boxes && det.boxes.length) {
+    try {
+      R.onBoxes(det.boxes.map(b => ({
+        left: b.left / W, right: b.right / W,
+        top: (y0 + b.top) / imgCanvas.height,
+        bottom: (y0 + b.bottom) / imgCanvas.height,
+      })));
+      await yieldUI();
+    } catch (e) { /* рамки — подсказка, не повод падать */ }
+  }
     if (!det.boxes.length) return null;
     // Группа = самый верхний бокс плюс то, что идёт сразу под ним без большого
     // разрыва (строки одного облачка). Проверка «перекрываются по вертикали»
@@ -3902,6 +3924,20 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   // Конвейер уже прогнал детектор, чтобы начать читать раньше, — второй раз
   // его не гоняем (это ~450 мс на полосу). Кадр детектора тот же: полоса.
   const det = preDet || await detectWithRetry(src, R);
+  // ── СНАЧАЛА РАМКИ, ПОТОМ РАСПОЗНАВАНИЕ ───────────────────────────────────
+  // Просьба с телефона 06.11, 10:58: показать, что найдено, ДО распознавания,
+  // чтобы потеря строки была видна сразу, а не по пропавшему слову в реплике.
+  // Страница рисует рамки по этому вызову и успевает их отрисовать (yieldUI).
+  if (typeof R.onBoxes === 'function' && det.boxes && det.boxes.length) {
+    try {
+      R.onBoxes(det.boxes.map(b => ({
+        left: b.left / src.width, right: b.right / src.width,
+        top: (y0 + b.top) / imgCanvas.height,
+        bottom: (y0 + b.bottom) / imgCanvas.height,
+      })));
+      await yieldUI();
+    } catch (e) { /* рамки — подсказка, не повод падать */ }
+  }
   const detMs = Math.round(performance.now() - t0);
   const t1 = performance.now();
   const W = src.width, H = src.height;
@@ -4182,7 +4218,45 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   // и «3 блоков · 1 строка» выглядело как норма (телефон 06.11).
   let unreadBoxes = 0;
   for (const entry of byBox) {
-    const got = entry.items.filter(it => it && it.text && it.text.trim());
+    let got = entry.items.filter(it => it && it.text && it.text.trim());
+    if (!got.length) {
+      // ── Вторая попытка ────────────────────────────────────────────────
+      // Бокс, из которого движок не прочитал ни слова, читаем ещё раз: кроп
+      // чуть шире и выше, без обрезки краёв. Раньше такой блок просто исчезал —
+      // в тосте честно стояло «не прочитано блоков: 1», но человек видел
+      // только пропавшую строку («ПОНЯТНО.» в облачке, телефон 06.11, 10:58).
+      try {
+        for (const ln of textLines(src, entry.box, R).slice(0, 3)) {
+          if (!visible(ln)) continue;
+          const pad = Math.max(3, Math.round((ln.bottom - ln.top) * 0.18));
+          const l2 = {
+            left: Math.max(0, ln.left - pad), right: Math.min(src.width, ln.right + pad),
+            top: Math.max(0, ln.top - pad), bottom: Math.min(src.height, ln.bottom + pad),
+          };
+          const wide = (ln.right - ln.left) / W >= 0.25;
+          const r2 = await decodeLine(src, l2, wide, { skipExt: true });
+          const t2 = String((r2 && r2.text) || '').trim();
+          // Вторая попытка не должна приносить мусор: только настоящий текст.
+          if (t2 && (t2.match(/\p{L}/gu) || []).length >= 2
+              && !(typeof looksLikeJunkLine === 'function' && looksLikeJunkLine(t2, R))
+              && (!(typeof Words !== 'undefined' && Words && Words.ready) || (() => {
+                   const f = (t2.match(/[А-Яа-яЁёA-Za-z]{2,}/) || [''])[0].toLowerCase();
+                   return !!f && (Words.isKnown(f) || Words.inDict(f));
+                 })())) {
+            entry.items.push({
+              text: t2, left: ln.left / W, top: (y0 + ln.top) / imgCanvas.height,
+              right: ln.right / W, bottom: (y0 + ln.bottom) / imgCanvas.height,
+              confidence: r2.conf, retry: true,
+              box: {
+                left: entry.box.left / W, top: (y0 + entry.box.top) / imgCanvas.height,
+                right: entry.box.right / W, bottom: (y0 + entry.box.bottom) / imgCanvas.height,
+              },
+            });
+          }
+        }
+      } catch (e) { /* вторая попытка не обязана удаться */ }
+      got = entry.items.filter(it => it && it.text && it.text.trim());
+    }
     if (!got.length) unreadBoxes++;
     for (const item of entry.items) regions.push(item);
   }
@@ -4224,6 +4298,64 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   // считается служебной, только если она ПЛОСКАЯ (однотонная заливка без
   // рисунка) и прижата к верхнему/нижнему краю кадра — поэтому тёмная панель
   // манги у края страницы не пострадает: у неё есть фактура.
+  // ── Ни одна НАЙДЕННАЯ рамка не остаётся пустой ───────────────────────────
+  // Требование с телефона 06.11, 10:58: сначала рамки, потом распознавание —
+  // и рамка без текста означает потерю. Здесь последняя проверка: если в
+  // нарисованном прямоугольнике нет ни одной прочитанной строки, читаем его
+  // принудительно (кроп с полями, без порога уверенности). Именно так терялось
+  // «ПОНЯТНО.» в облачке: движок нашёл блок, но строку отбросил по уверенности.
+  if (R.boxCoverage !== false) {
+    const covered = (b) => {
+      const L = b.left / W, Rt = b.right / W;
+      const T = (y0 + b.top) / imgCanvas.height, B = (y0 + b.bottom) / imgCanvas.height;
+      return regions.some(r => {
+        const ox = Math.min(r.right, Rt) - Math.max(r.left, L);
+        const oy = Math.min(r.bottom, B) - Math.max(r.top, T);
+        return ox > 0 && oy > 0;
+      });
+    };
+    for (const b of det.boxes) {
+      if (covered(b)) continue;
+      try {
+        const pad = Math.max(4, Math.round((b.bottom - b.top) * 0.2));
+        const box2 = {
+          left: Math.max(0, b.left - pad), right: Math.min(src.width, b.right + pad),
+          top: Math.max(0, b.top - pad), bottom: Math.min(src.height, b.bottom + pad),
+        };
+        for (const ln of textLines(src, box2, R)) {
+          if (!visible(ln)) continue;
+          // Рамка, которая заметно выше строки, — это рисунок/декор, а не
+          // облачко: принудительное чтение такой рамки давало мусор
+          // («plo», «е риооорн …», проверка на Mieruko).
+          if ((b.bottom - b.top) > Math.max(4, (ln.bottom - ln.top)) * 3.2) continue;
+          const wide = (ln.right - ln.left) / W >= 0.25;
+          const got = await decodeLine(src, ln, wide, { skipExt: true });
+          const text = String((got && got.text) || '').trim();
+          if ((text.match(/\p{L}/gu) || []).length < 2) continue;
+          if (typeof looksLikeJunkLine === 'function' && looksLikeJunkLine(text, R)) continue;
+          // Первое слово должно быть настоящим: строка, начавшаяся с обрывка
+          // («е риооорн …»), — это кусок декора, а не реплика.
+          if (typeof Words !== 'undefined' && Words && Words.ready) {
+            const first = (text.match(/[А-Яа-яЁёA-Za-z]{2,}/) || [''])[0].toLowerCase();
+            if (!first || !(Words.isKnown(first) || Words.inDict(first))) continue;
+          }
+          regions.push({
+            text,
+            left: ln.left / W, top: (y0 + ln.top) / imgCanvas.height,
+            right: ln.right / W, bottom: (y0 + ln.bottom) / imgCanvas.height,
+            confidence: (got && got.conf) || 0,
+            box: {
+              left: b.left / W, top: (y0 + b.top) / imgCanvas.height,
+              right: b.right / W, bottom: (y0 + b.bottom) / imgCanvas.height,
+            },
+            fromEmptyBox: true,
+          });
+          break;                     // одной строки из рамки достаточно
+        }
+      } catch (e) { /* не обязано получиться */ }
+    }
+  }
+
   const chrome = chromeBands(src, R);
   const clean = regions.filter(r => !inChrome(r, chrome));
 
@@ -4274,9 +4406,12 @@ function chromeBands(src, R) {
       }
       const mean = sum / w;
       const sd = Math.sqrt(Math.max(0, sum2 / w - mean * mean));
-      // плоская строка: почти нет разброса и это либо тёмная заливка, либо
-      // светлая; серый «туман» страницы сюда не попадает
-      flat[y] = sd < 0.055 && (mean < 0.35 || mean > 0.82) ? 1 : 0;
+      // Плоская строка — почти без разброса. Служебной считаем ТОЛЬКО тёмную
+      // заливку (шапка/панель читалки). Белая (бумага манги) — это страница,
+      // а не панель: раньше белое поле сверху страницы объявлялось «шапкой»,
+      // и первая строка облачка попадала в обрезку — «ПОНЯТНО.» пропадало,
+      // а в тосте стояло «не прочитано блоков: 1» (телефон 06.11, 10:58).
+      flat[y] = sd < 0.055 && mean < 0.35 ? 1 : 0;
     }
     let flatCount = 0;
     for (let y = 0; y < h; y++) if (flat[y]) flatCount++;

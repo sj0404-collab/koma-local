@@ -85,7 +85,12 @@ const Reader = {
     // пропадали, а потом человек видел «Распознаём…» уже после листания.
     if (!this.regions.get(this.page)) {
       this.hideStart();
-      if (RULES.autoScan && OCR.ready) setTimeout(() => { this.scanCurrent(false); }, 0);
+      if (RULES.autoScan && OCR.ready) {
+        setTimeout(async () => {
+          try { await this.ensureLoaded(this.page); } catch (e) { /* ниже проверит scan */ }
+          if (!this.regions.get(this.page)) this.scanCurrent(false);
+        }, 0);
+      }
     } else this.hideStart();
   },
 
@@ -229,6 +234,31 @@ const Reader = {
       d.onclick = () => TTS.speakLine(line);
       framesEl.appendChild(d);
     });
+  },
+
+  /**
+   * Рамки НАЙДЕННОГО — до распознавания (просьба 06.11, 10:58).
+   *
+   * Пока движок читает строки, на странице уже видно, ЧТО он нашёл. Если рамка
+   * есть, а слова в реплике нет — это видно сразу, а не по пропавшему «ПОНЯТНО.».
+   * Пунктирные фиолетовые рамки = «найдено, читаю сейчас»; после распознавания
+   * их заменяют обычные рамки реплик.
+   */
+  paintPendingFrames(i, boxes) {
+    const framesEl = this.mode === 'vertical'
+      ? document.querySelector(`#strip [data-frames="${i}"]`)
+      : document.querySelector(`#paged [data-frames="${i}"]`);
+    if (!framesEl || !Array.isArray(boxes) || !boxes.length) return;
+    framesEl.innerHTML = '';
+    for (const b of boxes) {
+      const d = document.createElement('div');
+      d.className = 'frame pending';
+      d.style.left = (b.left * 100) + '%';
+      d.style.top = (b.top * 100) + '%';
+      d.style.width = Math.max(0.4, (b.right - b.left) * 100) + '%';
+      d.style.height = Math.max(0.4, (b.bottom - b.top) * 100) + '%';
+      framesEl.appendChild(d);
+    }
   },
 
   paintAllFrames() {
@@ -535,6 +565,17 @@ const Reader = {
     }
 
     let c = this.canvases[i];
+    if (!c) {
+      // Распознавание стартует сразу при открытии главы — и застаёт момент,
+      // когда страница ещё не декодирована. Раньше это давало ложный тост
+      // «Страница 1 ещё не загрузилась» поверх идущего распознавания
+      // (телефон 06.11, 11:00). Теперь ждём загрузку, а не ругаемся.
+      try { await this.ensureLoaded(i); } catch (e) { /* ниже подождём */ }
+      for (let w = 0; !this.canvases[i] && w < 25; w++) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      c = this.canvases[i];
+    }
     if (!c) { toast('Страница ' + (i + 1) + ' ещё не загрузилась'); return null; }
     // Пустой кадр (ширина/высота 0) — это ещё не нарисованная страница. Раньше
     // распознавание запускалось сразу и читало «ничего»: человек видел, что
@@ -566,6 +607,9 @@ const Reader = {
     if (keepSheet) $('#textStats').textContent = `Распознаю страницу ${i + 1} заново…`;
     try {
       const label = band ? `полосу ${i + 1}` : `страницу ${i + 1}`;
+      // Рамки найденного рисуем ДО распознавания (см. paintPendingFrames).
+      const prevOnBoxes = RULES.onBoxes;
+      RULES.onBoxes = (boxes) => { try { this.paintPendingFrames(i, boxes); } catch (e) {} };
       const res = await recognizePage(c, RULES, (done, total, phase) => {
         // Числа проверяем: раньше сюда мог прийти текст фазы вместо числа, и в
         // бейдже висело «Распознаём… NaN/0» (телефон 22:41).
@@ -745,6 +789,7 @@ const Reader = {
       if (keepSheet) $('#textStats').textContent = msg;
       return null;
     } finally {
+      RULES.onBoxes = null;                    // крючок рамок — только на один проход
       State.scanning = false;
       State.prefetching = false;
       $('#scanBadge').classList.remove('on');
