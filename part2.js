@@ -3,15 +3,37 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-function toast(msg, ms = 2200) {
+function toast(msg, ms = 2200, quiet) {
+  const text = String(msg || '');
+  // Один и тот же текст не показываем дважды подряд: «Идёт распознавание —
+  // страница 2 встала в очередь» прилетало три раза и перекрывало страницу
+  // (журнал 06.11, 18:22:21–18:22:22). В журнал пишем каждую попытку.
+  let same = false;
+  try {
+    same = text === toast._last && (Date.now() - (toast._at || 0) < 5000);
+  } catch (e) { /* пусто */ }
+  toast._last = text; toast._at = Date.now();
+  try { Journal.add('сообщение', text); } catch (e) { /* журнала ещё нет */ }
+  if (same) return;
+  // Служебные сообщения (сколько реплик нашлось, сколько распознано, сколько
+  // страниц в буфере) не должны ложиться поверх текста: читают глазами ту же
+  // страницу, что слушают. Такие сообщения уходят в тонкую строку сверху —
+  // она живёт ниже шапки и на узком экране не закрывает облачка.
+  if (quiet) { soft(text, ms); return; }
   const el = $('#toast');
-  el.textContent = msg; el.classList.add('on');
+  el.textContent = text; el.classList.add('on');
   clearTimeout(toast._t);
   toast._t = setTimeout(() => el.classList.remove('on'), ms);
-  // Каждый тост — это и есть «что сказало приложение». Пишем его в журнал:
-  // человек потом может открыть журнал и показать, на чём именно споткнулись,
-  // вместо «оно не работает».
-  try { Journal.add('сообщение', String(msg || '')); } catch (e) { /* журнала ещё нет */ }
+}
+
+/** Служебная строка сверху (статус распознавания). Та же запись в журнал. */
+function soft(msg, ms = 2500) {
+  const el = $('#scanBadge');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.add('on');
+  clearTimeout(soft._t);
+  soft._t = setTimeout(() => el.classList.remove('on'), ms);
 }
 
 /* ───────────────────────── 0.1 ЖУРНАЛ ─────────────────────────
@@ -38,7 +60,7 @@ const Journal = {
     {
       id: 'voice-first-only',
       title: 'Голос читает только первую реплику, дальше «страница дочитана»',
-      status: 'fixed', since: 'v1.9.93–1.9.92',
+      status: 'fixed', since: 'v1.9.94–1.9.92',
       check: 'Нажмите ▶ на полосе с 2–3 репликами. В журнале должно быть по строке «озвучка … с» на КАЖДУЮ реплику.',
       fix: 'Читалка больше не отменяет речь перед каждой фразой, колбэки прошлой фразы не могут двигать очередь, оборванная фраза повторяется один раз.',
       more: 'Если повторится — в журнале будет «оборвана, повтор» или «движок не начал фразу». Пришлите эти строки.',
@@ -194,7 +216,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.93';
+const VERSION = 'v1.9.94';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.

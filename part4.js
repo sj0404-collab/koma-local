@@ -71,7 +71,7 @@ const Reader = {
           }
         }
       }
-      if (buf.length) toast('Из буфера: ' + buf.length + ' стр. уже распознаны', 3000);
+      if (buf.length) toast('Из буфера: ' + buf.length + ' стр. уже распознаны', 3000, true);
     } catch (e) { console.warn('буфер не прочитался', e); }
     $('#rTitle').textContent = book.title;
     $('#pageTotal').textContent = String(this.pages.length);
@@ -91,7 +91,7 @@ const Reader = {
           // Ждём два кадра: за это время лента получает настоящую высоту и
           // позицию. Без этого «полоса» считалась по неразложенной странице.
           await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-          if (!this.regions.get(this.page)) this.scanCurrent(false);
+          if (!this.regions.get(this.page)) this.scanCurrent(false, null, 'открытие страницы');
         }, 0);
       }
     } else this.hideStart();
@@ -746,6 +746,13 @@ const Reader = {
       // Последняя страховка: распознанная строка не имеет права пропасть.
       // Сюда попадаем уже после чистки и склейки — если строка выпала, вернём её.
       fresh = attachLostLines(fresh, res.regions || [], medH);
+      // Реплика, прочитанная дважды подряд внутри одной строки, — частая беда
+      // при узких полосах: половина облачка попадает в две полосы, и обе
+      // приносят свою расшифровку одной и той же фразы.
+      fresh = fresh.map(l => {
+        const t = dedupeRepeatText(l.text);
+        return t === l.text ? l : { ...l, rawText: l.rawText || l.text, text: t };
+      });
       // Помечаем, на какой полосе нашлась реплика: в шторке видно, что
       // показано «на экране», а что распознано раньше с этой же страницы.
       const bandTop = band ? Math.round(band.y0) : 0;
@@ -782,10 +789,16 @@ const Reader = {
             return false;
           };
           if (tailH > Math.max(200, bandH * 0.2) && darkInTail()) {
-            await this.scanCurrent(i, {
+            // Это полоса, а не «текущая страница»: scanCurrent() принимает
+            // (force, preDet, tag), поэтому объект с bandPx уезжал в preDet, а
+            // номер страницы — в force. Проверка молча возвращалась к целой
+            // странице: лишний полный проход на 10–14 с (журнал 06.11,
+            // 18:21:19 «детектор 3.3, распознавание 11.1»).
+            await this.scanPage(i, {
               bandPx: { y0: tailFrom, y1: band.y1, vy0: band.vy0, vy1: band.vy1,
                         key: bandKey + ':tail' + Math.round(tailFrom) },
               silent: true, internal: true, tail: true, force: true,
+              tag: 'дочитывание полосы',
             });
           }
         } catch (e) { console.warn('дочитывание полосы', e); }
@@ -821,7 +834,7 @@ const Reader = {
           + (OCR.nativeNote ? `, нативно не вышло: ${String(OCR.nativeNote).slice(0, 80)}` : '');
       toast(`${band ? 'Полоса' : 'Страница'} ${i + 1} ${force ? 'обновлена' : 'распознана'}: ${fresh.length} реплик`
         + (parts.length > 1 ? `, всего ${lines.length} на странице` : '')
-        + ` · ${totalSec} с (${how})`, 6000);
+        + ` · ${totalSec} с (${how})`, 6000, true);
       // Шторка остаётся открытой — и обязательно перерисовывается.
       if ($('#sheetText').classList.contains('on')) renderTextSheet(i);
       return this.regions.get(i);
@@ -1292,7 +1305,7 @@ const Buffer = {
     if (stale.length) {
       for (const k of stale) { try { await DB.del('kv', k); } catch (e) { /* не критично */ } }
       try {
-        toast('Текст прежней версии читалки забыт: ' + stale.length + ' стр. распознаются заново', 5000);
+        toast('Текст прежней версии читалки забыт: ' + stale.length + ' стр. распознаются заново', 5000, true);
       } catch (e) { /* toast может не быть готов */ }
     }
     return fresh
@@ -1796,7 +1809,7 @@ if (typeof window !== 'undefined') {
         case 'toggle':
           if (TTS.stopped) {
             TTS.prime();
-            Reader.scanCurrent(false).then(() => TTS.readVisible({ fromStart: true }));
+            Reader.scanCurrent(false, null, 'панель АПК: ▶').then(() => TTS.readVisible({ fromStart: true }));
           } else if (!TTS.paused) {
             TTS.pauseRead(); TTS.paused = true;
           } else {
@@ -2323,7 +2336,7 @@ const TTS = {
     }
     if (!Reader.regions.get(i)) {
       if (State.scanning) {
-        toast('Распознаю страницу, начну читать сразу после', 4000);
+        toast('Распознаю страницу, начну читать сразу после', 4000, true);
         const wait = setInterval(() => {
           if (!State.scanning) {
             clearInterval(wait);
@@ -2333,11 +2346,11 @@ const TTS = {
         return;
       }
       if (OCR.ready) {
-        toast('Сначала распознаю страницу…', 4000);
+        toast('Сначала распознаю страницу…', 4000, true);
         // Раньше сюда передавался `det` из другого метода — переменной в этой
         // области нет, и в браузере это давало «det.boxes is not iterable»
         // посреди чтения (журнал 06.11, 18:03:27). Детекцию делает сам scanPage.
-        await Reader.scanCurrent(false);
+        await Reader.scanCurrent(false, null, 'чтение');
       }
     }
     let lines = fromStart ? Reader.visibleLines() : Reader.unspokenInBand();
@@ -2362,7 +2375,7 @@ const TTS = {
       // Человек нажал ▶ сам: молча уехать на другую полосу/страницу нельзя —
       // читалка «перепрыгивала», не сказав ни слова (телефон 06.11, 11:34).
       if (!lines.length && fromStart) {
-        toast('На этой полосе непрочитанного текста нет — листните', 4000);
+        toast('На этой полосе непрочитанного текста нет — листните', 4000, true);
         return;
       }
       if (!lines.length && all.length) return this.advanceReading();   // естественный конец полосы
@@ -2372,10 +2385,10 @@ const TTS = {
       return this.advanceReading();
     }
     if (!lines.length && !Reader.visibleLines().length) {
-      if (Reader.scrollBusy) return toast('Лента едет — дочитаю, когда остановится', 3000);
+      if (Reader.scrollBusy) return toast('Лента едет — дочитаю, когда остановится', 3000, true);
       const data = Reader.regions.get(i);
       if (!data) { toast('Сначала нужно распознать страницу: ✨ Текст страницы', 4000); return; }
-      toast('На этой полосе нет распознанного текста — прокрутите к репликам', 4000);
+      toast('На этой полосе нет распознанного текста — прокрутите к репликам', 4000, true);
       return;
     }
     this.queue = lines.slice();          // только непрочитанное на этой полосе
@@ -2447,7 +2460,7 @@ const TTS = {
     $('#scanBadge').classList.add('on');
     $('#scanBadge').textContent = 'Распознаём… стр. ' + (i + 1);
     try {
-      await Reader.scanCurrent(false);
+      await Reader.scanCurrent(false, null, 'конвейер');
     } catch (e) { console.warn('конвейер: полоса не распозналась', e); }
     finally {
       this.scanDone = true;
@@ -2570,7 +2583,7 @@ const TTS = {
           if (!un.length && moved && !this.stopped) {
             try {
               const b2 = Reader.visibleBandPx(page);
-              await Reader.scanPage(page, { bandPx: b2, force: true, silent: true, internal: true });
+              await Reader.scanPage(page, { bandPx: b2, force: true, silent: true, internal: true, tag: 'догон полосы' });
               un = Reader.unspokenInBand();
             } catch (e) { /* не обязано получиться */ }
           }
@@ -2594,10 +2607,30 @@ const TTS = {
         // (например, текст попал в полосу, которую мы не считали текущей):
         // читаем их, а не прыгаем дальше молча.
         Reader.bandIndex = bands.length;
-        // «Остаток страницы» читаем, только если он действительно на экране.
-        // Иначе это снова чтение за кадром: реплики помечались прочитанными,
-        // а человек их не видел (06.11, 10:33).
-        const rest = Reader.unspokenInBand();
+        // ── ПЕРЕСЧЁТ КАДРА ────────────────────────────────────────────────
+        // «Остаток страницы» считался по Reader.band — по той полосе, которую
+        // распознали ПЕРВОЙ. Но лента к этому моменту уже уехала вперёд
+        // (glideToAhead), на экране другие облачка, а проверка смотрела в
+        // старое окно. Отсюда журнал 06.11, 18:21:56: прозвучала первая
+        // реплика — и сразу «Страница 1 дочитана», хотя на экране ещё два
+        // облачка, которые потом и читались. Теперь кадр берём по геометрии:
+        // что видно СЕЙЧАС, то и остаток.
+        let rest = [];
+        try {
+          const px = Reader.visibleBandPx(page);
+          const cv = Reader.canvases[page];
+          if (px && cv && cv.height) {
+            Reader.band = { top: px.y0 / cv.height, bottom: px.y1 / cv.height, whole: false };
+            if (RULES.autoScan && !Reader.bandCoveredPx(page, px)) {
+              await Reader.scanPage(page, { bandPx: px, silent: true, tag: 'догон: кадр' });
+            }
+            rest = Reader.unspokenInBand();
+          } else if (!px) {
+            // Страница целиком в экране — читаем всё непрочитанное на ней.
+            Reader.band = { whole: true };
+            rest = Reader.unspokenInBand();
+          }
+        } catch (e) { console.warn('остаток кадра', e); rest = []; }
         if (rest.length) { Reader.page = page; return this.readQueue(rest); }
 
         // ── Следующая страница ────────────────────────────────────────────
@@ -2623,7 +2656,7 @@ const TTS = {
           // Распознавание идёт ОДНОВРЕМЕННО с движением ленты, а не после него.
           const scanning = Reader.regions.get(next)
             ? Promise.resolve()
-            : Reader.scanPage(next, { full: true, silent: true }).catch(() => {});
+            : Reader.scanPage(next, { full: true, silent: true, tag: 'следующая страница' }).catch(() => {});
           if (moved) await SMOOTH.done();
           await scanning;
           if (this.stopped) return;
@@ -3288,6 +3321,60 @@ function watchScroll() {
  * вытесняет всё, что раньше попало в её вертикальный диапазон; одинаковый
  * текст с пересечением по вертикали тоже считается дублем.
  */
+/**
+ * Одна реплика, прочитанная дважды подряд.
+ *
+ * В облачке «Мы Просто ВыПол- / нили свою работу.» чтец вернул строку дважды:
+ * «Мы ПросТО ВыПол МЫ ПРОСТО ВЫПИЛ НИЛИ СВОЮ РАБОТУ» — и голос читал это
+ * целиком (проверка 06.11, 18:22:06). Тексты не совпадают дословно, поэтому
+ * ни сравнение строк, ни проверка «короткое входит в длинное» (жáдный проход
+ * букв) этого не ловили: «явыпол» и «выпил» расходятся на второй букве.
+ *
+ * Правило: если начало реплики (2–6 слов) почти дословно повторяется чуть
+ * дальше в ней же, и то, что останется после повтора, не короче выброшенного,
+ * — оставляем полное чтение, а черновое начало выбрасываем. Сравнение слов
+ * мягкое (регистр, одна лишняя/потерянная буква, обрезанный хвост).
+ */
+function dedupeRepeatText(text) {
+  const src = String(text || '').replace(/\s+/g, ' ').trim();
+  const words = src.split(' ');
+  const n = words.length;
+  if (n < 4) return src;
+  const letters = (w) => String(w || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  const dist1 = (a, b) => {
+    if (a === b) return true;
+    if (Math.abs(a.length - b.length) > 1) return false;
+    if (a.length >= 4 && (b.startsWith(a) || a.startsWith(b))) return true;
+    if (Math.min(a.length, b.length) < 5) return false;
+    let i = 0, j = 0, diff = 0;
+    while (i < a.length && j < b.length) {
+      if (a[i] === b[j]) { i++; j++; continue; }
+      if (++diff > 1) return false;
+      if (a.length > b.length) i++;
+      else if (b.length > a.length) j++;
+      else { i++; j++; }
+    }
+    return diff + (a.length - i) + (b.length - j) <= 1;
+  };
+  for (let k = Math.min(6, Math.floor(n / 2)); k >= 2; k--) {
+    for (let p = k; p + k <= n && p <= k + 3; p++) {
+      let ok = 0;
+      for (let t = 0; t < k; t++) {
+        const a = letters(words[t]), b = letters(words[p + t]);
+        if (a.length < 2 || b.length < 2) break;
+        if (!dist1(a, b)) break;
+        ok++;
+      }
+      if (ok < k) continue;
+      const head = words.slice(0, p).join(' ').replace(/[^\p{L}\p{N}]/gu, '');
+      const tail = words.slice(p).join(' ').replace(/[^\p{L}\p{N}]/gu, '');
+      if (tail.length < head.length) continue;      // полное чтение — в начале, не трогаем
+      return words.slice(p).join(' ');
+    }
+  }
+  return src;
+}
+
 function mergeBandLines(parts, canvas) {
   const H = (canvas && canvas.height) || 1;
   const out = [];

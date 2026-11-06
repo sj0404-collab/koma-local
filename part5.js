@@ -215,7 +215,7 @@ function bindUI() {
       const i = Reader.page;
       b.disabled = true;
       try {
-        await Reader.scanPage(i, { force: true, keepSheet: true, full: true });
+        await Reader.scanPage(i, { force: true, keepSheet: true, full: true, tag: 'вся страница' });
         renderTextSheet(i);
       } finally {
         b.disabled = false;
@@ -510,7 +510,7 @@ function bindUI() {
     const i = (Reader.textPage == null ? Reader.page : Reader.textPage);
     $('#btnRescan').disabled = true;
     try {
-      await Reader.scanPage(i, { force: true, keepSheet: true });
+      await Reader.scanPage(i, { force: true, keepSheet: true, tag: 'кнопка: заново' });
     } finally {
       $('#btnRescan').disabled = false;
     }
@@ -602,13 +602,13 @@ function bindUI() {
       TTS.prime();                       // разблокировать голос в жесте
       // Явное нажатие ▶ = «читай отсюда и с начала», а не «продолжай с того
       // места, где я остановился в прошлый раз» (жалоба 28.10 22:41).
-      Reader.scanCurrent(false).then(() => TTS.readVisible({ fromStart: true }));
+      Reader.scanCurrent(false, null, 'кнопка ▶').then(() => TTS.readVisible({ fromStart: true }));
     } else { TTS.stop(); }
   };
   // Стартовая карточка: страница сама ничего не запускает.
   $('#btnStartScan').onclick = async () => {
     Reader.hideStart();
-    await Reader.scanCurrent(false);
+    await Reader.scanCurrent(false, null, 'кнопка: распознать');
     // renderTextSheet — не промис в общем случае: вызываем через Promise.resolve,
     // иначе `.catch` падал с «Cannot read properties of undefined (reading 'catch')»
     // (это и был тост с телефона 28.10).
@@ -617,7 +617,7 @@ function bindUI() {
   $('#btnStartRead').onclick = async () => {
     TTS.prime();                        // голос разрешён только из жеста
     Reader.hideStart();
-    if (!Reader.regions.get(Reader.page)) await Reader.scanCurrent(false);
+    if (!Reader.regions.get(Reader.page)) await Reader.scanCurrent(false, null, 'кнопка: читать');
     TTS.readVisible();
   };
   $('#btnStartClose').onclick = () => Reader.hideStart();
@@ -627,7 +627,7 @@ function bindUI() {
     toast(RULES.autoScan
       ? 'Страницы будут распознаваться сами при открытии и прокрутке'
       : 'Само распознаваться больше не будет — только по кнопке', 3500);
-    if (RULES.autoScan) { Reader.hideStart(); Reader.scanCurrent(false); }
+    if (RULES.autoScan) { Reader.hideStart(); Reader.scanCurrent(false, null, 'авто: включили'); }
   };
 
   // Профиль скорости: одно нажатие меняет весь конвейер.
@@ -902,7 +902,7 @@ function bindUI() {
     syncSettingsUI();
   };
   $('#cbAuto').onchange = (e) => {
-    if (e.target.checked) Reader.scanCurrent(false).then(() => TTS.readVisible());
+    if (e.target.checked) Reader.scanCurrent(false, null, 'авточтение: включили').then(() => TTS.readVisible());
     else TTS.stop();
   };
   $('#cbSemi').onchange = (e) => { State.semi = e.target.checked; RULES.semiManual = e.target.checked; };
