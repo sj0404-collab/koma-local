@@ -2875,7 +2875,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.86';
+const VERSION = 'v1.9.87';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -9858,6 +9858,9 @@ const Reader = {
       if (RULES.autoScan && OCR.ready) {
         setTimeout(async () => {
           try { await this.ensureLoaded(this.page); } catch (e) { /* ниже проверит scan */ }
+          // Ждём два кадра: за это время лента получает настоящую высоту и
+          // позицию. Без этого «полоса» считалась по неразложенной странице.
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
           if (!this.regions.get(this.page)) this.scanCurrent(false);
         }, 0);
       }
@@ -10097,6 +10100,35 @@ const Reader = {
    * ограничена экраном плюс небольшим запасом, иначе в реплики попадает текст
    * на два экрана вперёд («нашёл 5 реплик, хотя видно одну»).
    */
+  /**
+   * Дождаться, пока геометрия ленты станет настоящей, и вернуть видимую полосу.
+   *
+   * Зачем: распознавание теперь стартует сразу при открытии главы, а в этот
+   * момент страница может быть ещё не разложена — тогда visibleBandPx отдаёт
+   * null, и код считает, что «видно всю страницу». Именно так на телефоне
+   * 06.11, 11:34 из одного облачка получалось «3 реплик, 10 строк»: приложение
+   * прочитало страницу ЦЕЛИКОМ и ещё не доехавшие облачка тоже.
+   *
+   * Возвращает null только в одном честном случае: страница действительно
+   * помещается на экран целиком.
+   */
+  async awaitBand(i) {
+    const scroller = $('#strip');
+    const view = (scroller && scroller.clientHeight) || window.innerHeight || 800;
+    for (let w = 0; w < 30; w++) {
+      const b = this.visibleBandPx(i);
+      if (b) return b;
+      const c = this.canvases[i];
+      const wrap = document.querySelector(`.pagewrap[data-page="${i}"]`);
+      if (c && c.height && wrap && !this.scrollBusy) {
+        const h = wrap.getBoundingClientRect().height;
+        if (h > 0 && h <= view * 1.03) return null;      // страница правда влезает
+      }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return this.visibleBandPx(i);
+  },
+
   visibleBandPx(i) {
     try { return this.visibleBandPxInner(i); } catch (e) { return null; }
   },
@@ -10310,7 +10342,7 @@ const Reader = {
     // opts.bandPx — явная полоса в пикселях кадра. Нужна, чтобы распознать
     // следующую полосу ЗАРАНЕЕ, пока звучит речь, и не ждать 3 секунды после
     // прокрутки (на телефоне 22:11 это выглядело как «прокрутил и молчит»).
-    const band = opts.full ? null : (opts.bandPx || this.visibleBandPx(i));
+    const band = opts.full ? null : (opts.bandPx || await this.awaitBand(i));
     const bandKey = band ? band.key : 'page';
     if (!(this.bandCache instanceof Map)) this.bandCache = new Map();
     const bandMap = this.bandCache.get(i) || new Map();
@@ -11885,15 +11917,27 @@ const TTS = {
     // с начала, а не упираемся в тупик. Требование с телефона 21:54: на
     // вебтуне видно облачко с «УЖЕ ... ЧИНАТЬ ...», а приложение отвечало
     // «на этой полосе нет распознанного текста».
-    // ТОЛЬКО ТО, ЧТО В КАДРЕ. Здесь раньше стояла «страховка»: если в полосе
-    // текста нет — читаем всю страницу с начала. Из-за неё голос читал реплики,
-    // которых человек не видит, и помечал их «прочитано» — на телефоне 06.11,
-    // 10:33 это выглядело как «ты где-то реплики видишь, а я нет».
-    // Правильно — не читать за кадром, а ПЕРЕЙТИ к следующей полосе с текстом.
+    // ТОЛЬКО ТО, ЧТО В КАДРЕ. Если в полосе по мнению Reader.band пусто —
+    // пересчитываем полосу по геометрии и берём строки из неё напрямую:
+    // Reader.band мог отстать от реальной прокрутки (после скачка ленты).
     if (!lines.length) {
       const data = Reader.regions.get(i);
       const all = (data && data.lines) || [];
-      if (all.length) return this.advanceReading();      // переход по полосам
+      const c = Reader.canvases[i];
+      let bnd = null;
+      try { bnd = Reader.visibleBandPx(i); } catch (e) { bnd = null; }
+      if (all.length && c && bnd) {
+        const inBand = all.filter(l => l.bottom * c.height > bnd.vy0 - 4 && l.top * c.height < bnd.vy1 + 4);
+        const freshInBand = inBand.filter(l => !Reader.spoken.has(l.key || (l.page + '|' + l.text)));
+        if (freshInBand.length) lines = freshInBand;
+      }
+      // Человек нажал ▶ сам: молча уехать на другую полосу/страницу нельзя —
+      // читалка «перепрыгивала», не сказав ни слова (телефон 06.11, 11:34).
+      if (!lines.length && fromStart) {
+        toast('На этой полосе непрочитанного текста нет — листните', 4000);
+        return;
+      }
+      if (!lines.length && all.length) return this.advanceReading();   // естественный конец полосы
     }
     if (!lines.length && Reader.visibleLines().length) {
       // На этой полосе всё прочитано — переходим к следующему куску.
@@ -12063,7 +12107,19 @@ const TTS = {
           const moved = Reader.scrollToBand(page, ni, true);
           const scanning = Reader.ensureBandLines(page, ni);   // не ждём — едем
           if (moved) await SMOOTH.done();                      // лента встала
-          const un = await scanning;
+          let un = await scanning;
+          // Полоса, которую распознавали В ДВИЖЕНИИ, может выйти пустой: кадр
+          // ещё ехал, полоса посчиталась по другой геометрии. Тогда реплика
+          // «проскакивала» — человек видел облачко, а голос уезжал дальше
+          // (телефон 06.11, 11:34: «слово ХА-А так и не закрасилось»).
+          // Пересчитываем один раз на СТОЯЩЕЙ ленте, прежде чем считать полосу пустой.
+          if (!un.length && moved && !this.stopped) {
+            try {
+              const b2 = Reader.visibleBandPx(page);
+              await Reader.scanPage(page, { bandPx: b2, force: true, silent: true, internal: true });
+              un = Reader.unspokenInBand();
+            } catch (e) { /* не обязано получиться */ }
+          }
           if (this.stopped) return;
           if (un.length) {
             Reader.bandIndex = ni;
