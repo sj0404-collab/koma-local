@@ -292,7 +292,7 @@ const Reader = {
     // надо уточнить. Если текста нет вовсе — распознаём сразу, иначе на телефоне
     // первые секунды после листания уходили в пустоту (06.11, 10:33).
     if ((!this.scrollBusy || !data) && (!data || staleFull)) {
-      if (RULES.autoScan) { this.hideStart(); this.scanCurrent(false); }
+      if (RULES.autoScan) { this.hideStart(); this.scanCurrent(false, null, 'открытие'); }
       else this.showStart();
     }
     if (data && !staleFull) {
@@ -563,6 +563,11 @@ const Reader = {
   async scanPage(i, opts = {}) {
     this.hideStart();
     const silent = !!opts.silent;          // предзагрузка: без бейджа и тостов
+    // Метка источника: без неё в журнале видно «страница 2 встала в очередь»
+    // три раза подряд и неясно, кто просит. Пишем кто и что просит.
+    try { Journal.add('распознавание', 'запрос: ' + (opts.tag || 'без метки')
+      + (opts.force ? ' · заново' : '') + (opts.full ? ' · вся страница' : '')
+      + (silent ? ' · тихо' : '') + ' · стр. ' + (i + 1)); } catch (e) { /* ignore */ }
     const force = !!opts.force;
     const keepSheet = !!opts.keepSheet;
     if (i == null || i < 0 || i >= this.pages.length) return null;
@@ -835,13 +840,16 @@ const Reader = {
       $('#scanBadge').classList.remove('on');
       const p = State.pendingScan;
       State.pendingScan = null;
-      if (p) setTimeout(() => this.scanPage(p.i, { force: p.force, keepSheet: p.keepSheet }), 50);
+      // Повтор из очереди идёт БЕЗ «заново»: иначе один и тот же запрос
+      // перезапускался сам себя и тост «обновлена: 0 реплик» крутился кольцом
+      // (журнал 06.11, 18:04:01 → 18:04:04).
+      if (p) setTimeout(() => this.scanPage(p.i, { force: false, keepSheet: p.keepSheet, full: p.full, tag: 'очередь' }), 50);
     }
   },
 
   /** Совместимость: распознать текущую страницу. */
-  async scanCurrent(force = false, preDet = null) {
-    return this.scanPage(this.page, { force, det: preDet });
+  async scanCurrent(force = false, preDet = null, tag = '') {
+    return this.scanPage(this.page, { force, det: preDet, tag });
   },
 
   /** Карточка «ничего не запущено»: показывается, пока страница не распознана. */
@@ -1001,7 +1009,7 @@ const Reader = {
         return;
       }
       if (this.regions.get(from)) { this.prefetchPages(from + 1, count - 1); return; }
-      try { await this.scanPage(from, { full: true, silent: true }); } catch (e) { /* фон — молча */ }
+      try { await this.scanPage(from, { full: true, silent: true, tag: 'предзагрузка' }); } catch (e) { /* фон — молча */ }
       const data = this.regions.get(from);
       const empty = !data || !(data.lines || []).length;
       if (empty && count > 1) this.prefetchPages(from + 1, count - 1);
@@ -1097,7 +1105,7 @@ const Reader = {
     await this.waitIdle();
     if (!this.bandScanned(i, b)) {
       const px = this.bandPx(i, b);
-      if (px) await this.scanPage(i, { bandPx: px });
+      if (px) await this.scanPage(i, { bandPx: px, tag: 'полоса: чтение' });
     }
     this.band = b;
     return this.unspokenInBand();
@@ -1193,7 +1201,7 @@ const Reader = {
         if (Reader.bandScanned(i, bands[ni])) return;
         const px = Reader.bandPx(i, bands[ni]);
         if (!px) return;
-        await Reader.scanPage(i, { bandPx: px, silent: true });
+        await Reader.scanPage(i, { bandPx: px, silent: true, tag: 'заранее' });
       } catch (e) { /* фон — молча */ }
     }, 500);
   },
@@ -2326,7 +2334,10 @@ const TTS = {
       }
       if (OCR.ready) {
         toast('Сначала распознаю страницу…', 4000);
-        await Reader.scanCurrent(false, det);        // детекция уже есть — второй раз не гоняем
+        // Раньше сюда передавался `det` из другого метода — переменной в этой
+        // области нет, и в браузере это давало «det.boxes is not iterable»
+        // посреди чтения (журнал 06.11, 18:03:27). Детекцию делает сам scanPage.
+        await Reader.scanCurrent(false);
       }
     }
     let lines = fromStart ? Reader.visibleLines() : Reader.unspokenInBand();
@@ -2410,6 +2421,12 @@ const TTS = {
           band ? { ...band, y0: 0 } : null, det).catch(() => null);  // +100…300 мс
       } catch (e) { console.warn('конвейер: детектор не сработал', e); det = null; }
     }
+    // Пока полоса не досчитана, очередь НЕ закончена: иначе после первой же
+    // реплики step() видел пустую очередь, объявлял «страница дочитана» и уезжал
+    // дальше, а остальные две реплики звучали уже после этого (журнал 06.11,
+    // 18:03:27 → 18:03:51: «дочитана» дважды подряд).
+    this._expectMore = true;
+    this._expectMoreUntil = Date.now() + 20000;   // страховка от вечного «распознаю…»
     if (first) {
       // Первую реплику конвейера прогоняем через ТОТ ЖЕ фильтр, что и остальные
       // строки страницы (cleanLines): иначе в чтение пролезало то, что при
@@ -2436,6 +2453,8 @@ const TTS = {
       this.scanDone = true;
       $('#scanBadge').classList.remove('on');
     }
+    // Полоса досчитана: дальше очередь может закончиться по-настоящему.
+    this._expectMore = false;
     // Дальше — обычный путь по уже распознанной полосе (первая реплика уже
     // отмечена прочитанной, поэтому повторно не читается).
     if (!this.stopped) {
@@ -2459,6 +2478,13 @@ const TTS = {
     if (this.stopped) return;
     Reader.saveSpoken();
     if (this.idx >= this.queue.length) {
+      // Конвейер ещё досчитывает полосу — ждём, а не объявляем конец страницы.
+      if (this._expectMore && !this.stopped && Date.now() < (this._expectMoreUntil || 0)) {
+        $('#playStatus').textContent = 'распознаю…';
+        clearTimeout(this._waitMore);
+        this._waitMore = setTimeout(() => { if (!this.stopped) this.step(); }, 150);
+        return;
+      }
       // Конвейер: реплики ещё идут — ждём следующую, а не заканчиваем чтение.
       // Ждём ТОЛЬКО своё распознавание (конвейер). Раньше условие было
       // `!this.scanDone`, а без конвейера scanDone = undefined, то есть «ждём
@@ -3043,14 +3069,35 @@ async function ttsSelfTest(opts = {}) {
       onerror: (e) => { res.error = String((e && e.error) || e); res.ms = Date.now() - t0; },
     });
     if (!accepted) { res.error = res.error || 'движок не принял фразу'; }
+    // ── ЧЕСТНОЕ ИЗМЕРЕНИЕ ────────────────────────────────────────────────
+    // На Android Chrome события onstart/onend приходят НЕ ВСЕГДА, хотя звук
+    // есть: человек слышал «Проверка голоса», а приложение писало «не
+    // заговорил» (журнал 06.11, 18:02:56). Поэтому смотрим ещё и на состояние
+    // самого движка: говорящий движок — факт, событие — только удобство.
     const wait = silent ? 2500 : 6000;
     const until = Date.now() + wait;
-    while (Date.now() < until && !res.ended && !res.error) await sleep(100);
-    res.ok = !!(res.started && !res.error) && (!res.ended || res.ms > 150 || silent);
+    let sawSpeaking = false, lastBusy = 0;
+    while (Date.now() < until) {
+      await sleep(100);
+      try {
+        const s2 = VOICE.synth();
+        if (s2 && (s2.speaking || s2.pending)) {
+          if (!res.started) { res.started = true; res.startMs = Date.now() - t0; }
+          sawSpeaking = true; lastBusy = Date.now();
+        } else if (sawSpeaking && !res.ended) {
+          res.ended = true; res.ms = Date.now() - t0;
+        }
+      } catch (e) { /* ignore */ }
+      if (res.error || res.ended) break;
+    }
+    if (sawSpeaking && !res.ended) { res.ended = true; res.ms = (lastBusy || Date.now()) - t0; }
+    res.heard = sawSpeaking;
+    res.ok = !!((res.started || sawSpeaking) && !res.error)
+      && (!res.ended || res.ms > 120 || silent);
     res.text = [
       'движок: ' + res.kind,
       'голосов: ' + res.voices,
-      res.started ? ('старт ' + (res.startMs || 0) + ' мс') : 'не заговорил',
+      (res.started || res.heard) ? ('старт ' + (res.startMs || 0) + ' мс') : 'не заговорил',
       res.ended ? ('длительность ' + res.ms + ' мс') : '',
       res.error ? ('ошибка: ' + res.error) : '',
       res.paused ? 'движок был на паузе — снял' : '',
@@ -3380,7 +3427,7 @@ async function onScrollSettled() {
     // ключа: границы полосы прилипают к пустому месту и при каждом сдвиге
     // дают новый ключ, из-за чего один и тот же кадр распознавался по кругу.
     const done = Reader.bandCoveredPx(i, band);
-    if (!done) await Reader.scanPage(i, {});
+    if (!done) await Reader.scanPage(i, { tag: 'прокрутка' });
   }
   if (RULES.semiManual && State.semi) {
     if (State.waitingScroll) {

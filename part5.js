@@ -1235,8 +1235,9 @@ async function runVoiceCheck(silent) {
   TTS.lastCheckAt = new Date().toLocaleTimeString('ru-RU');
   await renderVoiceState();
   if (!silent) {
-    toast(r.ok ? 'Голос работает: ' + (r.ms / 1000).toFixed(1) + ' с · старт ' + (r.startMs || 0) + ' мс'
-      : 'Голос молчит: ' + (r.error || 'нет старта') + '. Смотрите журнал.', 8000);
+    toast(r.ok ? ('Голос работает: ' + (r.ms / 1000).toFixed(1) + ' с · старт ' + (r.startMs || 0) + ' мс'
+        + (r.heard ? '' : ' (по состоянию движка)'))
+      : ('Голос молчит: ' + (r.error || 'нет старта') + '. Смотрите журнал.'), 8000);
   }
   return r;
 }
@@ -1276,7 +1277,12 @@ try { if (typeof window !== 'undefined') { window.renderJournal = renderJournal;
     const once = () => {
       document.removeEventListener('pointerdown', once, true);
       document.removeEventListener('touchstart', once, true);
-      setTimeout(runStartCheck, 300);
+      // Разблокировка — ПРЯМО В ЖЕСТЕ, синхронно. Раньше «прогрев при запуске»
+      // запускался таймером, без жеста: Chrome такой синтез глушит, и в журнале
+      // было «не заговорил», хотя при нажатии кнопки голос звучал
+      // (06.11, 18:02:36 против 18:03:11).
+      try { TTS.prime(); } catch (e) { /* ignore */ }
+      setTimeout(runStartCheck, 350);
     };
     document.addEventListener('pointerdown', once, true);
     document.addEventListener('touchstart', once, true);
