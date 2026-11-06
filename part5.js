@@ -1209,7 +1209,11 @@ async function selfCheck() {
 // В песочнице (sandbox="allow-scripts" без allow-same-origin) даже чтение
 // navigator.serviceWorker бросает SecurityError — и человек видел «Ошибка: …».
 // Поэтому весь блок под try/catch: нет офлайн-кеша — просто идём дальше.
-if (/^https?:$/.test(location.protocol)) try {
+// Регистрируем только рядом с app-shell (index.html или корень): иначе одиночный
+// файл вроде koma-standalone.html просил несуществующий sw.js и в консоли
+// появлялся 404 — пусть и безвредный, но человек читает его как поломку.
+const isAppShell = /(\/|index\.html)$/.test(location.pathname);
+if (isAppShell && /^https?:$/.test(location.protocol)) try {
   if ('serviceWorker' in navigator) {
   // Регистрируем сразу, а не по событию load: скрипт стоит в конце документа,
   // к этому моменту DOM готов, а ждать load на 11-МБ странице — терять секунды.
