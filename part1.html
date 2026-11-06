@@ -142,6 +142,22 @@
   .nowline .ch{color:#b9c2b6;transition:color .08s}
   .nowline .ch.sp{color:#9fd18f}
   .nowline .ch.cur{color:#fff;text-shadow:0 0 5px #6fa8ff,0 0 12px #6fa8ff,0 0 20px #6fa8ff88}
+  /* ── Ручное выделение области для распознавания ──────────────────────── */
+  .pickLayer{position:fixed;inset:0;z-index:70;background:#00000022;touch-action:none;cursor:crosshair}
+  .pickRect{position:absolute;display:none;border:2px solid #9aa8ff;background:#7c8cff26;
+    border-radius:8px;pointer-events:none;box-shadow:0 0 0 1px #0006 inset}
+  /* Пока идёт выделение, нижняя панель и плавающие кнопки — ПОВЕРХ слоя:
+     иначе второе нажатие кнопки «⬚» физически не проходит (слой перехватывает
+     касание), и ручное распознавание невозможно — поймано стендом 06.11. */
+  /* Слой выделения НЕ накрывает нижнюю панель: иначе второе нажатие кнопки
+     «⬚» физически не проходит (слой перехватывает касание) — поймано стендом
+     06.11. Отступ снизу — высота панели + поля. */
+  .pickLayer{bottom:calc(86px + env(safe-area-inset-bottom))}
+  .roundbtn.on,.icon.on{background:#4a5bd6;color:#fff;box-shadow:0 0 0 2px #9aa8ff66}
+  .pickHint{position:fixed;left:50%;transform:translateX(-50%);
+    bottom:calc(env(safe-area-inset-bottom) + 132px);z-index:71;background:#0b0e13ee;color:#fff;
+    padding:9px 14px;border-radius:12px;font-size:13px;max-width:86vw;text-align:center;
+    pointer-events:none;border:1px solid #ffffff1f}
   .nextArrow{position:absolute;z-index:27;background:#232822e6;border-radius:28px;padding:8px 13px;
     display:flex;align-items:center;gap:6px;font-size:12px;box-shadow:0 6px 20px #0008}
   .nextArrow.down{left:50%;transform:translateX(-50%);bottom:150px}
@@ -618,6 +634,10 @@
   <div class="bottombar" id="readerBar">
     <button class="pillbtn" id="btnOcr2">Текст страницы</button>
     <button class="roundbtn" id="btnRead" title="Читать">▶</button>
+    <!-- Ручное распознавание области (просьба 06.11, 20:43: «добавь кнопку
+         распознать вручную: нажал на кнопку, выделил область и повторно нажал
+         на кнопку»). Двойной тап убран: на телефоне он попадал в системное меню. -->
+    <button class="roundbtn" id="btnPickArea" title="Распознать вручную — выделить область">⬚</button>
     <button class="roundbtn" id="btnFrames" title="Рамки">⛶</button>
     <span class="pgcounter"><b id="pageNum">1</b><span>/</span><span id="pageTotal">1</span></span>
   </div>
@@ -943,7 +963,8 @@
     <!-- Жест, о котором просили 06.11: «чтобы я мог два раза нажать на строку и
          он распознал именно её всю». Живёт здесь, чтобы не занимать экран
          чтения подсказками. -->
-    <div class="hint" style="margin:6px 0 2px">Двойной тап по облачку на странице — перечитать его целиком (все строки, крупным кропом) и озвучить.</div>
+    <div class="hint" style="margin:6px 0 2px">Если облачко распознано не целиком — нажмите «Распознать вручную», проведите рамку вокруг него на странице и нажмите кнопку ещё раз.</div>
+    <button class="btn" id="btnPickArea2" style="width:100%;margin:8px 0 4px;justify-content:center">⬚ Распознать вручную — выделить область</button>
     <div class="row" id="textNav" style="gap:8px;margin-top:8px;display:flex"></div>
     <button class="btn" id="btnFullPage" style="margin-top:8px">Распознать всю страницу целиком</button>
     <div class="lbl">КАК ЧИТАЕТСЯ</div>

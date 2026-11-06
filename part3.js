@@ -7,7 +7,7 @@ const DEFAULT_RULES = {
   inkCoefficient: 0.45, inkMin: 40, inkMax: 235, binarizeFallback: 110,
   inkTileRows: 4, inkLevels: 1,
   contrastGain: 2.2, contrastOffset: -140,
-  rescueMinRegions: 600, pageSide: 1600, rescueSide: 960, minConfidence: 0.22,
+  rescueMinRegions: 600, pageSide: 1600, rescueSide: 960, minConfidence: 0.25,
   cutMargin: 0.06, bandOverlap: 0, bandsMax: 8, wholeThreshold: 0.72,
   bubbleGap: 0.45, mergeHeightRatio: 1.8,
   speechRate: 0, autoScrollStep: 0.25, semiManual: false, semiManualSettleMs: 700,
@@ -1309,12 +1309,21 @@ function glueSplitWords(text) {
       if (!Words.inDict(cat.toLowerCase())) continue;
       const unknown = win.filter(w => !dict(w)).length;
       const shortFrag = win.filter(w => w.length <= 3 && !dict(w)).length;
-      // Третий, самый узкий случай: ОБЕ части по 1–3 буквы и склейка — частое
-      // слово. Так выглядит «ДЕ ЛО», «ПО ТОМ», «ТО ЖЕ», где обе половины по
-      // отдельности тоже слова и по словарю неразличимы. Для озвучки склейка
-      // безопасна: «тоже» и «то же» звучат одинаково.
+      // Третьего случая («обе части по 1–3 буквы, склейка — частое слово»)
+      // БОЛЬШЕ НЕТ. Он склеивал два настоящих слова: «НЕ ОН ВЫБРОСИЛ» →
+      // «НЕОНИВЫБРОСИЛ» — в журнале телефона 06.11, 20:41 так и вышло
+      // («разве неонивыбросиа»), «НА УРЕЗАНИЕ» → «наурезание». Для озвучки
+      // «тоже» и «то же» звучат одинаково, но пользователь требует, чтобы
+      // прочитанное совпадало с облачком. Склеиваем ТОЛЬКО когда в окне есть
+      // настоящий обрывок — слово, которого нет среди частых.
+      // Две короткие части, обе «словарные», — склеиваем, только если хотя бы
+      // одна из них НЕ из частых («ДЕ ЛО»: «де» — 1602-е, «ло» — 13717-е;
+      // «НЕ ОН» — 1-е и 9-е, значит это два настоящих слова, и «НЕОН» из них
+      // не делаем). Именно этот случай дал на телефоне «неонивыбросиа».
+      const rare = (w) => !(Words.rank && Words.rank.get(w.toLowerCase()) != null
+        && Words.rank.get(w.toLowerCase()) < 1000);
       const bothShort = win.length === 2 && win.every(w => w.length <= 3)
-        && !!Words.isKnown(cat.toLowerCase());
+        && win.some(rare) && !!Words.isKnown(cat.toLowerCase());
       if (!unknown && !shortFrag && !bothShort) continue;   // два настоящих слова подряд
       if (unknown > 1 && win.length > 3) continue;      // склеили бы целую фразу
       // Регистр: если в окне есть часть, набранная капсом, всё слово — капсом.
@@ -1358,8 +1367,25 @@ function isJunkReplica(text) {
   // реплику нельзя (поймано test-columns.cjs).
   if (letters > 12) return false;
   const words = t.split(/[^\p{L}]+/u).filter(Boolean);
-  return words.some(w => w.length === 1 && !REAL_ONE_LETTER.has(w.toLowerCase()));
+  if (words.some(w => w.length === 1 && !REAL_ONE_LETTER.has(w.toLowerCase()))) return true;
+  // Одно короткое слово, которого нет среди ходовых, — обрывок строки, а не
+  // реплика. Так на телефоне 06.11, 20:41 в озвучку попало «Исп» (начало
+  // «И спокойно лишил(а)…», отрезанное детектором). Настоящие возгласы
+  // («АХ», «ЭЙ», «ХА», «ЭК») в белом списке и остаются: на них жаловались
+  // отдельно — «ЭК!» не должен пропадать.
+  if (words.length === 1 && words[0].length <= 4 && Words && Words.ready && Words.rank) {
+    const w = words[0].toLowerCase();
+    if (!SHORT_SHOUTS.has(w)) {
+      const r = Words.rank.get(w);
+      if (r === undefined || r > 20000) return true;
+    }
+  }
+  return false;
 }
+/** Короткие возгласы, которые нельзя выбрасывать как обрывок. */
+const SHORT_SHOUTS = new Set(['ах', 'ох', 'ух', 'эх', 'эй', 'ой', 'ай', 'эк', 'ха',
+  'хе', 'хи', 'хм', 'мм', 'ага', 'угу', 'эм', 'упс', 'ну', 'да', 'нет', 'ты',
+  'что', 'как', 'оу', 'вау', 'бла', 'стоп', 'стой', 'эй!', 'боже']);
 
 /**
  * Срезает хвост-обрывок после конца фразы: «…ДЛЯ ПОДНОШЕНИЯ? ж с л» →
@@ -4377,111 +4403,58 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   // Теперь внутри каждой найденной рамки проверяются ВСЕ текстовые строки и
   // читаются те, которых ещё нет.
   if (R.boxCoverage !== false) {
-    const padOf = (b) => Math.max(4, Math.round((b.bottom - b.top) * 0.2));
-    const asFrac = (ln) => ({
-      left: ln.left / W, right: ln.right / W,
-      top: (y0 + ln.top) / imgCanvas.height, bottom: (y0 + ln.bottom) / imgCanvas.height,
-    });
-    const overlaps = (a, b, share = 0.35) => {
-      const ox = Math.min(a.right, b.right) - Math.max(a.left, b.left);
-      const oy = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
-      return ox > Math.min(a.right - a.left, b.right - b.left) * share && oy > 0;
-    };
-    const readRow = async (ln) => {
-      try {
-        const wide = (ln.right - ln.left) / W >= 0.25;
-        const got = await decodeLine(src, ln, wide, { skipExt: true });
-        const text = String((got && got.text) || '').trim();
-        if ((text.match(/\p{L}/gu) || []).length < 2) return null;
-        if (typeof looksLikeJunkLine === 'function' && looksLikeJunkLine(text, R)) return null;
-        if (typeof Words !== 'undefined' && Words && Words.ready) {
-          const first = (text.match(/[А-Яа-яЁёA-Za-z]{2,}/) || [''])[0].toLowerCase();
-          if (!first || !(Words.isKnown(first) || Words.inDict(first))) return null;
-        }
-        return { text, conf: (got && got.conf) || 0 };
-      } catch (e) { return null; }
-    };
-    // Бюджет на дочитывания: каждый кроп — отдельный вызов движка, а человек
-    // в это время ждёт звука (жалоба 06.11, 20:15: «долго молчать и тормозить
-    // стало чутка»). Три строки за проход — потолок.
-    let extraBudget = 3;
-    for (const b of det.boxes) {
-      if (extraBudget <= 0) break;
-      const pad = padOf(b);
-      const box2 = {
-        left: Math.max(0, b.left - pad), right: Math.min(src.width, b.right + pad),
-        top: Math.max(0, b.top - pad), bottom: Math.min(src.height, b.bottom + pad),
-      };
-      let rows = [];
-      try { rows = textLines(src, box2, R); } catch (e) { rows = []; }
-      if (!rows.length) continue;
-      const rowH = rows.reduce((acc, ln) => acc + (ln.bottom - ln.top), 0) / rows.length;
-      // Рамка, заметно выше строки, — это рисунок/декор, а не облачко. Для
-      // многострочных облачков допуск выше: именно там терялась вторая строка.
-      const allow = rows.length >= 2 ? 6.0 : 3.2;
-      if ((b.bottom - b.top) > Math.max(4, rowH) * allow) continue;
-      const inside = regions.filter(r => overlaps(r, asFrac(box2), 0.5));
-      const unread = rows.filter(ln => {
-        const f = asFrac(ln);
-        return visible(ln) && !regions.some(r => overlaps(r, f, 0.45));
+    const covered = (b) => {
+      const L = b.left / W, Rt = b.right / W;
+      const T = (y0 + b.top) / imgCanvas.height, B = (y0 + b.bottom) / imgCanvas.height;
+      return regions.some(r => {
+        const ox = Math.min(r.right, Rt) - Math.max(r.left, L);
+        const oy = Math.min(r.bottom, B) - Math.max(r.top, T);
+        return ox > 0 && oy > 0;
       });
-      if (!unread.length) continue;
-      if (!inside.length) {
-        // Пустая рамка: читаем первую осмысленную строку, как раньше.
-        for (const ln of unread.slice(0, 1)) {
-          extraBudget--;
-          const got = await readRow(ln);
-          if (!got) continue;
-          const f = asFrac(ln);
+    };
+    for (const b of det.boxes) {
+      if (covered(b)) continue;
+      try {
+        const pad = Math.max(4, Math.round((b.bottom - b.top) * 0.2));
+        const box2 = {
+          left: Math.max(0, b.left - pad), right: Math.min(src.width, b.right + pad),
+          top: Math.max(0, b.top - pad), bottom: Math.min(src.height, b.bottom + pad),
+        };
+        for (const ln of textLines(src, box2, R)) {
+          if (!visible(ln)) continue;
+          // Рамка, которая заметно выше строки, — это рисунок/декор, а не
+          // облачко: принудительное чтение такой рамки давало мусор
+          // («plo», «е риооорн …», проверка на Mieruko).
+          if ((b.bottom - b.top) > Math.max(4, (ln.bottom - ln.top)) * 3.2) continue;
+          const wide = (ln.right - ln.left) / W >= 0.25;
+          const got = await decodeLine(src, ln, wide, { skipExt: true });
+          const text = String((got && got.text) || '').trim();
+          if ((text.match(/\p{L}/gu) || []).length < 2) continue;
+          if (typeof looksLikeJunkLine === 'function' && looksLikeJunkLine(text, R)) continue;
+          if (typeof Words !== 'undefined' && Words && Words.ready) {
+            const first = (text.match(/[А-Яа-яЁёA-Za-z]{2,}/) || [''])[0].toLowerCase();
+            if (!first || !(Words.isKnown(first) || Words.inDict(first))) continue;
+          }
           regions.push({
-            text: got.text, ...f, confidence: got.conf,
-            box: { left: b.left / W, top: (y0 + b.top) / imgCanvas.height,
-                   right: b.right / W, bottom: (y0 + b.bottom) / imgCanvas.height },
+            text,
+            left: ln.left / W, top: (y0 + ln.top) / imgCanvas.height,
+            right: ln.right / W, bottom: (y0 + ln.bottom) / imgCanvas.height,
+            confidence: (got && got.conf) || 0,
+            box: {
+              left: b.left / W, top: (y0 + b.top) / imgCanvas.height,
+              right: b.right / W, bottom: (y0 + b.bottom) / imgCanvas.height,
+            },
             fromEmptyBox: true,
           });
-          break;
+          break;                     // одной строки из рамки достаточно
         }
-        continue;
-      }
-      // В рамке уже есть реплика, но не все её строки прочитаны. Это ДРУГАЯ
-      // причина потери (снимок 19:37: «НЕ УВЕРЕН» — одна строка, вторая без
-      // рамки и без текста). Дописываем такие строки В ТУ ЖЕ реплику, а не
-      // отдельной: иначе одна реплика выходит двумя (это запрещено).
-      for (const ln of unread.slice(0, 2)) {
-        if (extraBudget <= 0) break;
-        const f = asFrac(ln);
-        // Строка — продолжение: перекрывается по ширине и стоит плотно.
-        const host = inside
-          .filter(r => {
-            const ox = Math.min(r.right, f.right) - Math.max(r.left, f.left);
-            if (ox <= Math.min(r.right - r.left, f.right - f.left) * 0.25) return false;
-            const gap = Math.max(0, Math.max(r.top, f.top) - Math.min(r.bottom, f.bottom));
-            const gapLimit = (rowH / Math.max(1, imgCanvas.height)) * 1.2;
-            return gap <= gapLimit;
-          })
-          .sort((a, b2) => Math.abs(a.top - f.top) - Math.abs(b2.top - f.top))[0];
-        if (!host) continue;
-        extraBudget--;
-        const got = await readRow(ln);
-        if (!got) continue;
-        const above = f.top < host.top;
-        // Текст дописываем в порядке страницы: сверху — перед, снизу — после.
-        const add = String(got.text || '').trim();
-        host.text = above ? (add + ' ' + host.text) : (host.text + ' ' + add);
-        host.text = host.text.replace(/\s+/g, ' ').trim();
-        host.top = Math.min(host.top, f.top);
-        host.bottom = Math.max(host.bottom, f.bottom);
-        host.left = Math.min(host.left, f.left);
-        host.right = Math.max(host.right, f.right);
-        host.mergedRows = (host.mergedRows || 0) + 1;
-        delete host.key;
-      }
+      } catch (e) { /* не обязано получиться */ }
     }
   }
 
   // Рамка каждой реплики дорастает до контура своего пузыря.
   const grownLog = [];
-  if (R.growToBubble !== false && Array.isArray(det.boxes) && det.boxes.length && regions.length) {
+  if (R.growToBubble === true && Array.isArray(det.boxes) && det.boxes.length && regions.length) {
     const pageBoxes = det.boxes.map(b => ({
       left: b.left / W, top: (y0 + b.top) / imgCanvas.height,
       right: b.right / W, bottom: (y0 + b.bottom) / imgCanvas.height,
@@ -5027,7 +5000,43 @@ function bubblesOf(group, rtl, R) {
   const merged = orderBubbles(absorbOrphans(mergeBubbles(lines, bubbleGap, R.mergeHeightRatio)), rtl);
   // Реплика-мусор в озвучку не идёт: «е ой», «Тг. чв». Настоящие короткие
   // реплики («ДА», «НЕТ!») остаются — в них слова из словаря, а не обрывки.
-  return merged.filter(b => !isJunkReplica(b.text));
+  return dropCoveredDuplicates(merged.filter(b => !isJunkReplica(b.text)));
+}
+
+/**
+ * Одна и та же реплика, найденная дважды.
+ *
+ * Стенд 06.11 (mieruko p04) отдал «ТЫ ВИДИШЬ МЕНЯ?» два раза в одном и том же
+ * месте: рамки 0.650–0.706 и 0.658–0.703, текст совпадает буква в букву.
+ * Голос читал облачко дважды — это ровно то, что запрещено приёмкой
+ * («ни одной повторной реплики»). Схлопываем только при ЯВНОМ совпадении:
+ * рамки перекрываются больше чем наполовину по площади И текст совпадает
+ * (без регистра и знаков) либо один целиком входит в другой. Разные облачка
+ * с одинаковым текстом (два «ТЫ ВИДИШЬ МЕНЯ?» в разных концах страницы)
+ * стоят в разных местах и под это правило не попадают.
+ */
+function dropCoveredDuplicates(list) {
+  if (!Array.isArray(list) || list.length <= 1) return list;
+  const norm = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  const area = (b) => Math.max(0, b.right - b.left) * Math.max(0, b.bottom - b.top);
+  const out = [];
+  for (const b of list.slice().sort((x, y) => area(y) - area(x))) {
+    const nb = norm(b.text);
+    const twin = out.find(o => {
+      if (!nb) return false;
+      const no = norm(o.text);
+      if (no !== nb && !no.includes(nb) && !nb.includes(no)) return false;
+      const ix = Math.min(o.right, b.right) - Math.max(o.left, b.left);
+      const iy = Math.min(o.bottom, b.bottom) - Math.max(o.top, b.top);
+      if (ix <= 0 || iy <= 0) return false;
+      const inter = ix * iy;
+      const uni = area(o) + area(b) - inter;
+      return uni > 0 && inter / uni >= 0.5;
+    });
+    if (!twin) out.push(b);
+  }
+  // Порядок чтения не должен поменяться из-за сортировки по площади.
+  return out.sort((a, b) => (a.top - b.top) || (a.left - b.left));
 }
 
 /* Склейка переноса: дефис/тире — без пробела. */

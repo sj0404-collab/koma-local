@@ -293,8 +293,22 @@ const Reader = {
       }
       return bestOfPass;
     };
+    // Увеличение — не «чем больше, тем лучше». Стенд 06.11 на облачке
+    // «ТЫ ВИДИШЬ МЕНЯ?»: при 1x чтец отдаёт верное «ТЫ», при 2x и выше —
+    // «Тb» (латинская b вместо Ы), и это уходило в озвучку. Поэтому сначала
+    // читаем в НАТИВНОМ масштабе, потом в расчётном, и только при слабом
+    // результате поднимаем увеличение. При равном счёте остаётся меньшее:
+    // лишние пиксели ничего не добавили.
     const k0 = clamp(Math.round(1500 / Math.max(sw, sh)), 1, 4);
-    let best = await runPass(k0);
+    let best = await runPass(1);
+    if (k0 > 1) {
+      const bigger = await runPass(k0);
+      if (bigger && (!best || bigger.score > best.score + 0.01)) best = bigger;
+    }
+    if ((!best || best.score < 2.0) && k0 > 1 && k0 < 4) {
+      const mid = await runPass(Math.min(3, k0));
+      if (mid && (!best || mid.score > best.score + 0.01)) best = mid;
+    }
     // Слабый результат (одно-два словарных слова) — пробуем крупнее: мелкий
     // каллиграфический шрифт читается только при увеличении 3–4x. Так «Исп» и
     // «Испокойнолии» получают второй шанс без участия человека.
@@ -306,7 +320,12 @@ const Reader = {
   },
 
   /**
-   * Перераспознать ОДНУ реплику целиком и прочитать её (двойной тап по рамке).
+   * Перераспознать ОДНУ реплику целиком и прочитать её.
+   *
+   * ЖЕСТА ДВОЙНОГО ТАПА БОЛЬШЕ НЕТ (просьба 06.11, 20:43: он открывал системное
+   * меню картинки и не засчитывался). Функция осталась как внутренний
+   * помощник: её механизм (кроп + несколько подготовок + выбор лучшего чтения)
+   * использует кнопка «⬚ Распознать вручную», см. scanArea.
    *
    * Зачем: автопроход полосы иногда берёт только часть облачка — «ПОНЯТНО.»
    * превращается в «НОНО», из двух строк остаётся одна, вторая приходит другим
@@ -318,6 +337,173 @@ const Reader = {
    * Если новое чтение НЕ лучше прежнего (меньше словарных слов) — текст не
    * трогаем: смысл жеста в том, чтобы стало точнее, а не «иначе».
    */
+  /**
+   * ── РУЧНОЕ РАСПОЗНАВАНИЕ ОБЛАСТИ ────────────────────────────────────────
+   * Просьба с телефона 06.11, 20:43: «двойной клик не засчитывается, он мне
+   * открывает и скрывает меню, так что убери его… добавь кнопку распознать
+   * вручную: нажал на кнопку, выделил область и повторно нажал на кнопку».
+   *
+   * Как работает: первое нажатие включает режим выделения (поверх страницы
+   * ложится прозрачный слой), палец чертит рамку; рамка остаётся на экране;
+   * второе нажатие кнопки — область вырезается из страницы, увеличивается и
+   * распознаётся ОТДЕЛЬНО, результат встаёт на место прежних реплик в этой
+   * области и сразу читается вслух.
+   */
+  pickToggle() {
+    if (this._pick && this._pick.rect) { this.pickApply(); return; }
+    if (this._pick) { this.pickCancel(); toast('Выделение отменено', 2000, true); return; }
+    this.pickBegin();
+  },
+
+  pickHint(text, sticky) {
+    try {
+      let el = document.getElementById('pickHint');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'pickHint'; el.className = 'pickHint';
+        document.body.appendChild(el);
+      }
+      el.textContent = text;
+      el.style.display = 'block';
+      clearTimeout(this._pickHintT);
+      if (!sticky) this._pickHintT = setTimeout(() => { el.style.display = 'none'; }, 3500);
+    } catch (e) { /* подсказка не критична */ }
+  },
+
+  pickBegin() {
+    const page = (typeof this.pageAtViewport === 'function' ? this.pageAtViewport() : this.page) | 0;
+    const layer = document.createElement('div');
+    layer.className = 'pickLayer';
+    const box = document.createElement('div');
+    box.className = 'pickRect';
+    layer.appendChild(box);
+    document.body.appendChild(layer);
+    const st = { page, layer, box, rect: null, drawing: false, x0: 0, y0: 0 };
+    this._pick = st;
+    this.setPickButton(true);
+    try { document.body.classList.add('picking'); } catch (e) { /* не критично */ }
+    this.pickHint('Проведите рамку вокруг облачка, затем нажмите кнопку ещё раз', true);
+    layer.addEventListener('pointerdown', (e) => {
+      st.drawing = true; st.x0 = e.clientX; st.y0 = e.clientY;
+      box.style.display = 'block';
+      box.style.left = st.x0 + 'px'; box.style.top = st.y0 + 'px';
+      box.style.width = '0px'; box.style.height = '0px';
+      try { layer.setPointerCapture(e.pointerId); } catch (err) { /* не критично */ }
+      e.preventDefault();
+    });
+    layer.addEventListener('pointermove', (e) => {
+      if (!st.drawing) return;
+      const x = Math.min(e.clientX, st.x0), y = Math.min(e.clientY, st.y0);
+      box.style.left = x + 'px'; box.style.top = y + 'px';
+      box.style.width = Math.abs(e.clientX - st.x0) + 'px';
+      box.style.height = Math.abs(e.clientY - st.y0) + 'px';
+      e.preventDefault();
+    });
+    layer.addEventListener('pointerup', (e) => {
+      if (!st.drawing) return;
+      st.drawing = false;
+      const r = {
+        left: Math.min(e.clientX, st.x0), top: Math.min(e.clientY, st.y0),
+        right: Math.max(e.clientX, st.x0), bottom: Math.max(e.clientY, st.y0),
+      };
+      if (r.right - r.left < 24 || r.bottom - r.top < 16) {
+        st.rect = null; box.style.display = 'none';
+        this.pickHint('Слишком маленькая рамка — проведите ещё раз', true);
+        return;
+      }
+      st.rect = r;
+      this.pickHint('Область выделена — нажмите кнопку «⬚» ещё раз', true);
+      e.preventDefault();
+    });
+  },
+
+  pickCancel() {
+    const st = this._pick;
+    this._pick = null;
+    this.setPickButton(false);
+    try { document.body.classList.remove('picking'); } catch (e) { /* не критично */ }
+    try { if (st && st.layer && st.layer.parentNode) st.layer.parentNode.removeChild(st.layer); } catch (e) { /* уже нет */ }
+    const hint = document.getElementById('pickHint');
+    if (hint) hint.style.display = 'none';
+  },
+
+  setPickButton(on) {
+    for (const id of ['btnPickArea', 'btnPickArea2']) {
+      const b = document.getElementById(id);
+      if (!b) continue;
+      b.classList.toggle('on', !!on);
+      if (id === 'btnPickArea') b.textContent = on ? '✓' : '⬚';
+      else b.textContent = on ? '✓ Распознать выделенное' : '⬚ Распознать вручную — выделить область';
+    }
+  },
+
+  /** Перевести экранную рамку в доли страницы и распознать область. */
+  async pickApply() {
+    const st = this._pick;
+    if (!st || !st.rect) return;
+    const page = st.page;
+    const img = (this.imgEls && this.imgEls[page]) || document.querySelector('.pagewrap[data-page="' + page + '"] img');
+    const rect = st.rect;
+    this.pickCancel();
+    if (!img) { toast('Страница не найдена на экране', 3000); return; }
+    const r = img.getBoundingClientRect();
+    if (!r.width || !r.height) { toast('Страница ещё не отрисована', 3000); return; }
+    const frac = {
+      left: clamp((rect.left - r.left) / r.width, 0, 1),
+      right: clamp((rect.right - r.left) / r.width, 0, 1),
+      top: clamp((rect.top - r.top) / r.height, 0, 1),
+      bottom: clamp((rect.bottom - r.top) / r.height, 0, 1),
+    };
+    if (frac.right - frac.left < 0.02 || frac.bottom - frac.top < 0.01) {
+      toast('Область слишком мала — выделите крупнее', 3000);
+      return;
+    }
+    await this.scanArea(page, frac);
+  },
+
+  /**
+   * Распознать выделенный прямоугольник страницы и поставить его на место
+   * прежних реплик, которые в него попали.
+   */
+  async scanArea(page, frac) {
+    if (typeof OCR === 'undefined' || !OCR.ready) { toast('Сначала добавьте модели OCR (⚙ → Модели)'); return; }
+    const c = this.canvases[page];
+    if (!c || !c.width) { toast('Страница ещё не готова', 3000); return; }
+    soft('Распознаю выделенную область…', 4000);
+    // Читаем кроп ТЕМ ЖЕ механизмом, что и перечитывание реплики: несколько
+    // подготовок (кроп, контраст, ч/б) и второй проход крупнее, из них берётся
+    // лучший по оценке текста. На этом стенде именно так «ТВ ИДИШЬ» стало
+    // «ТЫ ВИДИШЬ МЕНЯ?» — простое увеличение кропа ошибочно.
+    let got = null;
+    try {
+      got = await this.ocrLineCrop(page, { left: frac.left, top: frac.top, right: frac.right, bottom: frac.bottom });
+    } catch (e) { got = null; }
+    if (!got || !got.text) { toast('В этой области текст не читается — выделите плотнее', 4000); return; }
+    const text = got.text;
+    const data = this.regions.get(page) || { lines: [] };
+    const area = got.bbox || frac;
+    // Убираем прежние реплики, которые попали внутрь выделения (их центр
+    // внутри новой рамки): их текст заменяет новое, полное чтение.
+    const centreIn = (l) => {
+      const cx = (l.left + l.right) / 2, cy = (l.top + l.bottom) / 2;
+      return cx >= frac.left - 0.01 && cx <= frac.right + 0.01
+        && cy >= frac.top - 0.01 && cy <= frac.bottom + 0.01;
+    };
+    const kept = (data.lines || []).filter(l => !centreIn(l));
+    const added = {
+      left: area.left, right: area.right, top: area.top, bottom: area.bottom,
+      text, rawText: got.raw || text, manual: true, confidence: 1, fromPick: true,
+    };
+    const lines = kept.concat([added]).sort((a, b) => (a.top - b.top) || (a.left - b.left));
+    this.regions.set(page, { ...data, lines });
+    try { await this.savePageBuffer(page); } catch (e) { /* не критично */ }
+    this.paintPage(page);
+    try { Journal.add('распознавание', 'выделено вручную: «' + text.slice(0, 60) + '»'); } catch (e) { /* нет журнала */ }
+    toast('Распознано вручную: «' + text.slice(0, 46) + (text.length > 46 ? '…' : '') + '»', 3500);
+    this.page = page;
+    if (typeof TTS !== 'undefined' && TTS) { try { TTS.prime(); TTS.speakLine(added); } catch (e) { /* голос не обязателен */ } }
+  },
+
   async rereadLine(page, idx) {
     const data = this.regions.get(page);
     if (!data || !Array.isArray(data.lines) || !data.lines[idx]) return;
@@ -379,21 +565,11 @@ const Reader = {
       if (line.large) d.classList.add('large');     // титул/каллиграфия — другой цвет
       if (isCur) d.classList.add('cur');
       else if (isDone) d.classList.add('done');
-      // Один тап — прочитать реплику. ДВА тапа по той же рамке — перераспознать
-      // ИМЕННО ЕЁ целиком и прочитать заново (просьба с телефона 06.11, 19:05:
-      // «когда он сам сканирует, он теряет строки и буквы, но когда я два раза
-      // ткнул на текст, он распознал и прочитал его весь — добавь жест, чтобы я
-      // мог два раза нажать на строку и он распознал именно её всю»).
-      d.onclick = () => {
-        const now = Date.now();
-        if (this._tapIdx === idx && this._tapPage === i && now - (this._tapAt || 0) < 450) {
-          this._tapAt = 0; this._tapIdx = -1;
-          try { this.rereadLine(i, idx); } catch (e) { console.warn('перечитывание реплики', e); }
-          return;
-        }
-        this._tapAt = now; this._tapIdx = idx; this._tapPage = i;
-        TTS.speakLine(line);
-      };
+      // Один тап по рамке — прочитать реплику. Двойного тапа больше нет: на
+      // телефоне он попадал в системное меню (открывал и закрывал его) и не
+      // засчитывался (жалоба 06.11, 20:43). Вместо него — кнопка «Распознать
+      // вручную»: нажали, выделили область, нажали ещё раз.
+      d.onclick = () => TTS.speakLine(line);
       framesEl.appendChild(d);
     });
   },
@@ -941,68 +1117,9 @@ const Reader = {
         const t = dedupeRepeatText(l.text);
         return t === l.text ? l : { ...l, rawText: l.rawText || l.text, text: t };
       });
-      // ── Починка строк, обрезанных краем полосы ────────────────────────
-      // Полоса — это кадр, и строка, попавшая на её край, приходит обрезанной:
-      // «ПОНЯТНО.» → «НОНО», «РАЗВЕ НЕ ОН ВЫРОСЛА» → «азве не он выросла»
-      // (журнал 06.11, 19:05:26 и снимки 19:06:48). Такие строки перечитываем
-      // поодиночке, крупным кропом и без соседей — тот самый путь, который
-      // человек делает двойным тапом. Больше одной-двух за проход не берём:
-      // каждый кроп — это отдельный вызов движка.
-      if (band && fresh.length && !silent && typeof OCR !== 'undefined' && OCR.ready) {
-        const cvH = (c && c.height) || 0;
-        const nearEdge = (l) => {
-          if (!cvH) return false;
-          const tpx = Number(l.top) * cvH, bpx = Number(l.bottom) * cvH;
-          return (tpx - Number(band.y0) < 12) || (Number(band.y1) - bpx < 12);
-        };
-        const fixLimit = 1;   // один кроп за проход: больше — это уже «долго молчит»
-        const broken = fresh.filter(nearEdge).slice(0, fixLimit);
-        for (const l of broken) {
-          try {
-            const got = await this.ocrLineCrop(i, l);
-            const wasT0 = String(l.text || '');
-            // Замену принимаем ТОЛЬКО если новый текст содержит прежний: соседняя
-            // строка в кропе не имеет права вытеснить прочитанное (журнал 06.11,
-            // 20:11:20: «НЕ МОГУ ОСТАВИТЬ ЭТО БЕЗ ВНИМАНИЯ» → «ДАЖЕ ЕСЛИ И ТАК…»).
-            const letters = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-            const subseq = (a, b) => {
-              let i = 0;
-              for (let j = 0; j < b.length && i < a.length; j++) if (a[i] === b[j]) i++;
-              return a.length ? i / a.length : 0;
-            };
-            const wasL = letters(wasT0), gotL = letters(got && got.text);
-            const keepsOld = !wasL || subseq(wasL, gotL) >= 0.85;
-            if (got && got.text && got.text !== wasT0 && keepsOld && textBetter(got.text, wasT0)) {
-              const wasT = wasT0;
-              if (got.text !== wasT) {
-                try {
-                  Journal.add('распознавание', 'край полосы, строка перечитана: «'
-                    + wasT.slice(0, 34) + '» → «' + got.text.slice(0, 34) + '»');
-                } catch (e) { /* журнала может не быть */ }
-              }
-              Object.assign(l, { text: got.text, rawText: got.raw, ...got.bbox });
-              delete l.key;
-            }
-          } catch (e) { /* одна строка — не повод ронять проход */ }
-        }
-      }
-      // ── Ручная правка главнее полосы ──────────────────────────────────
-      // Человек дважды коснулся облачка — текст стал точным. Следующий проход
-      // полосы (конвейер, догон, предзагрузка) не имеет права вернуть прежнее
-      // «reading» хуже: так ручная работа пропадала через пару секунд.
-      try {
-        const prev = this.regions.get(i);
-        const manual = ((prev && prev.lines) || []).filter(l => l && l.manual);
-        if (manual.length) {
-          const hit = (a, b) => (Math.min(a.right, b.right) - Math.max(a.left, b.left)) > 0
-            && (Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)) > 0;
-          for (const m of manual) {
-            const k = lines.findIndex(l => hit(l, m));
-            if (k >= 0) lines[k] = { ...m }; else lines.push(m);
-          }
-          lines.sort((a, b) => (a.top - b.top) || (a.left - b.left));
-        }
-      } catch (e) { /* не критично */ }
+      // Строки у края полосы СПЕЦИАЛЬНО не перечитываем: авторемонт подменял
+      // текст соседней строки (журнал 06.11, 20:11:20 «НЕ МОГУ ОСТАВИТЬ ЭТО БЕЗ
+      // ВНИМАНИЯ» → «ДАЖЕ ЕСЛИ И ТАК…»). Для этого есть ручное выделение области.
       // Помечаем, на какой полосе нашлась реплика: в шторке видно, что
       // показано «на экране», а что распознано раньше с этой же страницы.
       const bandTop = band ? Math.round(band.y0) : 0;
@@ -3694,7 +3811,13 @@ function textScore(t) {
     if (low.length < 2) { score -= 1; continue; }
     let known = false;
     try { known = !!(typeof Words !== 'undefined' && Words.isKnown && Words.isKnown(low)); } catch (e) { known = false; }
-    score += known ? 3 : 0;
+    // Частотность решает спор равных кандидатов. Стенд 06.11: на одном и том
+    // же кропе чтец давал «ТЫ ВИДИШЬ МЕНЯ?» и «ТВ ВИДИШЬ МЕНЯ?»; оба слова
+    // словарные, счёт был равный, и выбиралось первое попавшееся — «ТВ»
+    // (4855-е слово). «ты» — 5-е. Частое слово и есть настоящее.
+    let rank = undefined;
+    try { rank = (typeof Words !== 'undefined' && Words.rank && Words.rank.get(low)); } catch (e) { rank = undefined; }
+    score += known ? 3 + (rank === undefined ? 0 : 2 * Math.max(0, 1 - rank / 20000)) : 0;
     score += Math.min(low.length, 12) * 0.05;
   }
   // Мусор внутри слова (двоеточия, чёрточки посреди капса) — минус.
@@ -3707,7 +3830,14 @@ function dedupeRepeatText(text) {
   const words = src.split(' ');
   const n = words.length;
   if (n < 4) return src;
-  const letters = (w) => String(w || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  // Кириллица и латиница в одном слове — обычное дело у чтеца («HE» вместо
+  // «НЕ»). Для сравнения повторов буквы схлопываем к кириллице: иначе
+  // «АХ, HE АХ, НЕ ОТВЕТИЛА В LINE» не считалось повтором и читалось целиком.
+  const LOOK = { a: 'а', b: 'в', c: 'с', e: 'е', h: 'н', k: 'к', m: 'м', o: 'о',
+    p: 'р', t: 'т', x: 'х', y: 'у', u: 'и', '0': 'о', '3': 'з' };
+  const letters = (w) => String(w || '').toLowerCase()
+    .replace(/[^\p{L}\p{N}]/gu, '')
+    .replace(/[a-z0-9]/g, (ch) => LOOK[ch] || ch);
   const dist1 = (a, b) => {
     if (a === b) return true;
     if (Math.abs(a.length - b.length) > 1) return false;

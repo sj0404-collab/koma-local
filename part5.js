@@ -587,6 +587,18 @@ function bindUI() {
     } catch (e) { /* нет моста — покажем, что есть */ }
     Plugins.load().then(syncPluginsUI);
   };
+  // Кнопка «Распознать вручную» (⬚): первое нажатие — режим выделения,
+  // второе — распознать выделенный прямоугольник (просьба 06.11, 20:43).
+  const pickOn = (ev) => {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    if (!Reader.book) { toast('Сначала откройте главу', 2500); return; }
+    Reader.pickToggle();
+  };
+  { const b1 = $('#btnPickArea'); if (b1) b1.onclick = pickOn; }
+  { const b2 = $('#btnPickArea2'); if (b2) b2.onclick = (ev) => {
+      try { if (typeof closeSheets === 'function') closeSheets(); } catch (e) { /* шторки нет */ }
+      pickOn(ev);
+    }; }
   $('#btnFrames').onclick = () => {
     Reader.frames = !Reader.frames;
     // Настройка живёт в правилах: иначе после перезапуска рамки молча
