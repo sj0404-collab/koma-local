@@ -243,52 +243,64 @@ const Reader = {
     const sw = Math.max(12, Math.round((x1 - x0) * c.width));
     const sh = Math.max(12, Math.round((y1 - y0) * c.height));
     if (sx < 0 || sy < 0 || sx + sw > c.width + 1 || sy + sh > c.height + 1) return null;
-    const k = clamp(Math.round(1500 / Math.max(sw, sh)), 1, 4);
-    const crop = makeCanvas(sw * k, sh * k);
-    const cx = crop.getContext('2d', { willReadFrequently: true });
-    cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = 'high';
-    cx.drawImage(c, sx, sy, sw, sh, 0, 0, crop.width, crop.height);
-    // Бледная каллиграфия и светлый текст на рисунке читаются по-разному:
-    // пробуем сам кроп и его контрастную копию, берём лучший по словам.
-    const variants = [crop];
-    try { variants.push(contrastCanvas(crop)); } catch (e) { /* нет — и ладно */ }
-    let best = null;
-    for (const work of variants) {
-      let res = null;
-      try { res = await recognizePage(work, RULES, () => {}, null, null); } catch (e) { res = null; }
-      const rows = (res && res.regions ? res.regions : [])
-        .filter(r => r && r.text && r.bottom > r.top)
-        .map(r => ({
-          text: r.text,
-          left: x0 + r.left * (x1 - x0), right: x0 + r.right * (x1 - x0),
-          top: y0 + r.top * (y1 - y0), bottom: y0 + r.bottom * (y1 - y0),
-        }))
-        .filter(r => {
-          const cr = (r.left + r.right) / 2;
-          return cr >= line.left - w * 0.25 && cr <= line.right + w * 0.25;
-        })
-        .sort((a, b) => (a.top - b.top) || (a.left - b.left));
-      if (!rows.length) continue;
-      const raw = rows.map(r => r.text).join(' ');
-      let text = raw;
-      try { text = cleanSpeech(raw); } catch (e) { /* без чистки */ }
-      // Перенос по слогам внутри облачка: «БОЛЬ- ШОЕ» — это «БОЛЬШОЕ».
-      // Склеиваем только когда обе части капсом: «по-моему» так не пострадает.
-      text = String(text || '').replace(/(\p{Lu})[-–—:]\s+(\p{Lu})/gu, '$1$2');
-      text = dehyphenText(text);
-      if (!text || text.replace(/[^\p{L}]/gu, '').length < 2) continue;
-      const score = textScore(text);
-      if (!best || score > best.score) {
-        best = {
-          text, raw, score,
-          bbox: {
-            left: Math.min(line.left, ...rows.map(r => r.left)),
-            right: Math.max(line.right, ...rows.map(r => r.right)),
-            top: Math.min(line.top, ...rows.map(r => r.top)),
-            bottom: Math.max(line.bottom, ...rows.map(r => r.bottom)),
-          },
-        };
+    const variantsOf = (k) => {
+      const crop = makeCanvas(sw * k, sh * k);
+      const cx = crop.getContext('2d', { willReadFrequently: true });
+      cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = 'high';
+      cx.drawImage(c, sx, sy, sw, sh, 0, 0, crop.width, crop.height);
+      const out = [crop];
+      try { out.push(contrastCanvas(crop)); } catch (e) { /* нет — и ладно */ }
+      try { out.push(binarizeCanvas(crop, 0, RULES)); } catch (e) { /* нет — и ладно */ }
+      return out;
+    };
+    const runPass = async (k) => {
+      let bestOfPass = null;
+      for (const work of variantsOf(k)) {
+        let res = null;
+        try { res = await recognizePage(work, RULES, () => {}, null, null); } catch (e) { res = null; }
+        const rows = (res && res.regions ? res.regions : [])
+          .filter(r => r && r.text && r.bottom > r.top)
+          .map(r => ({
+            text: r.text,
+            left: x0 + r.left * (x1 - x0), right: x0 + r.right * (x1 - x0),
+            top: y0 + r.top * (y1 - y0), bottom: y0 + r.bottom * (y1 - y0),
+          }))
+          .filter(r => {
+            const cr = (r.left + r.right) / 2;
+            return cr >= line.left - w * 0.25 && cr <= line.right + w * 0.25;
+          })
+          .sort((a, b) => (a.top - b.top) || (a.left - b.left));
+        if (!rows.length) continue;
+        const raw = rows.map(r => r.text).join(' ');
+        let text = raw;
+        try { text = cleanSpeech(raw); } catch (e) { /* без чистки */ }
+        // Перенос по слогам внутри облачка: «БОЛЬ- ШОЕ» — это «БОЛЬШОЕ».
+        text = String(text || '').replace(/(\p{Lu})[-–—:]\s+(\p{Lu})/gu, '$1$2');
+        text = dehyphenText(text);
+        if (!text || text.replace(/[^\p{L}]/gu, '').length < 2) continue;
+        const score = textScore(text);
+        if (!bestOfPass || score > bestOfPass.score) {
+          bestOfPass = {
+            text, raw, score,
+            bbox: {
+              left: Math.min(line.left, ...rows.map(r => r.left)),
+              right: Math.max(line.right, ...rows.map(r => r.right)),
+              top: Math.min(line.top, ...rows.map(r => r.top)),
+              bottom: Math.max(line.bottom, ...rows.map(r => r.bottom)),
+            },
+          };
+        }
       }
+      return bestOfPass;
+    };
+    const k0 = clamp(Math.round(1500 / Math.max(sw, sh)), 1, 4);
+    let best = await runPass(k0);
+    // Слабый результат (одно-два словарных слова) — пробуем крупнее: мелкий
+    // каллиграфический шрифт читается только при увеличении 3–4x. Так «Исп» и
+    // «Испокойнолии» получают второй шанс без участия человека.
+    if ((!best || best.score < 2.0) && k0 < 4) {
+      const bigger = await runPass(Math.min(4, k0 + 1));
+      if (bigger && (!best || bigger.score > best.score)) best = bigger;
     }
     return best;
   },
@@ -936,20 +948,31 @@ const Reader = {
       // поодиночке, крупным кропом и без соседей — тот самый путь, который
       // человек делает двойным тапом. Больше одной-двух за проход не берём:
       // каждый кроп — это отдельный вызов движка.
-      if (band && fresh.length && typeof OCR !== 'undefined' && OCR.ready) {
+      if (band && fresh.length && !silent && typeof OCR !== 'undefined' && OCR.ready) {
         const cvH = (c && c.height) || 0;
         const nearEdge = (l) => {
           if (!cvH) return false;
           const tpx = Number(l.top) * cvH, bpx = Number(l.bottom) * cvH;
           return (tpx - Number(band.y0) < 12) || (Number(band.y1) - bpx < 12);
         };
-        const fixLimit = silent ? 1 : 2;
+        const fixLimit = 1;   // один кроп за проход: больше — это уже «долго молчит»
         const broken = fresh.filter(nearEdge).slice(0, fixLimit);
         for (const l of broken) {
           try {
             const got = await this.ocrLineCrop(i, l);
             const wasT0 = String(l.text || '');
-            if (got && got.text && got.text !== wasT0 && textBetter(got.text, wasT0)) {
+            // Замену принимаем ТОЛЬКО если новый текст содержит прежний: соседняя
+            // строка в кропе не имеет права вытеснить прочитанное (журнал 06.11,
+            // 20:11:20: «НЕ МОГУ ОСТАВИТЬ ЭТО БЕЗ ВНИМАНИЯ» → «ДАЖЕ ЕСЛИ И ТАК…»).
+            const letters = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+            const subseq = (a, b) => {
+              let i = 0;
+              for (let j = 0; j < b.length && i < a.length; j++) if (a[i] === b[j]) i++;
+              return a.length ? i / a.length : 0;
+            };
+            const wasL = letters(wasT0), gotL = letters(got && got.text);
+            const keepsOld = !wasL || subseq(wasL, gotL) >= 0.85;
+            if (got && got.text && got.text !== wasT0 && keepsOld && textBetter(got.text, wasT0)) {
               const wasT = wasT0;
               if (got.text !== wasT) {
                 try {
@@ -2822,21 +2845,36 @@ const TTS = {
           // (телефон 06.11, 11:34: «слово ХА-А так и не закрасилось»).
           // Пересчитываем один раз на СТОЯЩЕЙ ленте, прежде чем считать полосу пустой.
           if (!un.length && moved && !this.stopped) {
-            try {
-              const b2 = Reader.visibleBandPx(page);
-              const redone = await Reader.scanPage(page, { bandPx: b2, force: true, silent: true, internal: true, tag: 'догон полосы' });
-              un = Reader.unspokenInBand();
-              // Детектор нашёл строки (5–12), а реплик — ноль: распознавание
-              // полосы прошло впустую (журнал 06.11, 18:47:41 «0 реплик, всего
-              // 0 на странице · детектор 2.5 с, распознавание 0.1 с, 5 строк»).
-              // Тогда один раз читаем ЦЕЛУЮ страницу: на второй попытке тот же
-              // участок читался нормально.
-              const seen = Number((redone && (redone.crops || redone.boxes)) || 0);
-              if (!un.length && seen > 0) {
-                await Reader.scanPage(page, { force: true, silent: true, tag: 'целая страница после пустой полосы' });
-                un = Reader.unspokenInBand();
-              }
-            } catch (e) { /* не обязано получиться */ }
+            // Ретраи уходят В ФОН и больше не держат голос.
+            //
+            // Журнал 06.11, 20:12:29–20:12:42: между репликами «ХА-А» и
+            // «ПОЛУЧАЕТСЯ, ГРАФ…» прошло 13 секунд тишины — это «догон полосы»
+            // и «целая страница после пустой полосы» стояли в очереди движка,
+            // и чтение ждало их. Человек слышит это как «долго молчит».
+            // Теперь: полосу пропускаем сразу, а повторный проход запускаем
+            // следом, тихо, не блокируя следующую реплику. И только когда
+            // очередь чтения действительно пуста.
+            this._bgRetry = this._bgRetry || new Set();
+            const retryKey = page + ':' + ni;
+            if (!this._bgRetry.has(retryKey) && (!this.queue || this.idx >= (this.queue || []).length)) {
+              this._bgRetry.add(retryKey);
+              setTimeout(async () => {
+                try {
+                  if (this.stopped || (this.queue && this.idx < this.queue.length)) return;
+                  const b2 = Reader.visibleBandPx(page);
+                  const redone = await Reader.scanPage(page, { bandPx: b2, force: true, silent: true, internal: true, tag: 'догон полосы' });
+                  const seen = Number((redone && (redone.crops || redone.boxes)) || 0);
+                  let un2 = Reader.unspokenInBand();
+                  // Детектор нашёл строки, а реплик — ноль: полоса распознана
+                  // впустую. Один раз читаем целую страницу.
+                  if (!un2.length && seen > 0) {
+                    await Reader.scanPage(page, { force: true, silent: true, tag: 'целая страница после пустой полосы' });
+                    un2 = Reader.unspokenInBand();
+                  }
+                } catch (e) { /* не обязано получиться */ }
+                finally { this._bgRetry.delete(retryKey); }
+              }, 500);
+            }
           }
           if (this.stopped) return;
           if (un.length) {

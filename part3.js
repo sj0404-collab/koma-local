@@ -4401,7 +4401,12 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
         return { text, conf: (got && got.conf) || 0 };
       } catch (e) { return null; }
     };
+    // Бюджет на дочитывания: каждый кроп — отдельный вызов движка, а человек
+    // в это время ждёт звука (жалоба 06.11, 20:15: «долго молчать и тормозить
+    // стало чутка»). Три строки за проход — потолок.
+    let extraBudget = 3;
     for (const b of det.boxes) {
+      if (extraBudget <= 0) break;
       const pad = padOf(b);
       const box2 = {
         left: Math.max(0, b.left - pad), right: Math.min(src.width, b.right + pad),
@@ -4424,6 +4429,7 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
       if (!inside.length) {
         // Пустая рамка: читаем первую осмысленную строку, как раньше.
         for (const ln of unread.slice(0, 1)) {
+          extraBudget--;
           const got = await readRow(ln);
           if (!got) continue;
           const f = asFrac(ln);
@@ -4442,6 +4448,7 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
       // рамки и без текста). Дописываем такие строки В ТУ ЖЕ реплику, а не
       // отдельной: иначе одна реплика выходит двумя (это запрещено).
       for (const ln of unread.slice(0, 2)) {
+        if (extraBudget <= 0) break;
         const f = asFrac(ln);
         // Строка — продолжение: перекрывается по ширине и стоит плотно.
         const host = inside
@@ -4454,6 +4461,7 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
           })
           .sort((a, b2) => Math.abs(a.top - f.top) - Math.abs(b2.top - f.top))[0];
         if (!host) continue;
+        extraBudget--;
         const got = await readRow(ln);
         if (!got) continue;
         const above = f.top < host.top;
