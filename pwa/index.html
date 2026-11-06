@@ -2875,7 +2875,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.88';
+const VERSION = 'v1.9.89';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -3847,6 +3847,13 @@ function libGoTab(tab) {
  * вовсе: тап по книге молча ничего не делал. Ошибки теперь видно, а не в консоли.
  */
 async function openBook(book) {
+  // Голос держим наготове ДО открытия книги (просьба 06.11, 12:22): тап по
+  // главе — это уже жест, значит синтезатор можно разблокировать здесь, а не
+  // в момент ▶. Задержка первой реплики уходит.
+  try {
+    if (typeof TTS !== 'undefined' && TTS.prewarm) TTS.prewarm();
+    if (typeof TTS !== 'undefined' && TTS.prime) TTS.prime();
+  } catch (e) { /* голос не должен мешать открытию книги */ }
   try {
     await Reader.open(book);
     await Library.touch(book);
@@ -11771,6 +11778,38 @@ const TTS = {
    * с ошибкой not-allowed — панель есть, звука нет. Пустая фраза в самом
    * обработчике нажатия разблокирует синтезатор.
    */
+  /**
+   * Держать синтез «горячим» ДО открытия книги.
+   *
+   * Просьба с телефона 06.11, 12:22: «до открытия книги уже держи tts
+   * включённым, чтобы задержка была поменьше». Задержка бралась не из сети, а
+   * из холодного старта: список голосов Chrome отдаёт асинхронно, синтезатор
+   * до первого касания заблокирован, и первая реплика либо ждала, либо уходила
+   * в системный голос «по умолчанию». Теперь список голосов запрашивается при
+   * запуске приложения, а разблокировка — на первом же касании экрана, задолго
+   * до ▶.
+   */
+  prewarm() {
+    if (this._warm) { try { VOICE.resume(); } catch (e) { /* не критично */ } return; }
+    this._warm = true;
+    try {
+      const sw = VOICE.synth();
+      const load = () => { try { VOICE.voices(); } catch (e) { /* ignore */ } };
+      load();
+      if (sw && typeof sw.addEventListener === 'function') sw.addEventListener('voiceschanged', load);
+    } catch (e) { /* не критично */ }
+    try {
+      const unlock = () => {
+        try { this.prime(); } catch (e) { /* ignore */ }
+        try {
+          document.removeEventListener('pointerdown', unlock, true);
+          document.removeEventListener('touchstart', unlock, true);
+        } catch (e) { /* ignore */ }
+      };
+      document.addEventListener('pointerdown', unlock, true);
+      document.addEventListener('touchstart', unlock, true);
+    } catch (e) { /* не критично */ }
+  },
   prime() {
     // В АПК голос нативный: там нет правила «только из жеста», разблокировать нечего.
     // Edge играет mp3 в <audio> и тоже не требует «разблокировки» — а пустая
@@ -11884,13 +11923,24 @@ const TTS = {
       const ms = Date.now() - t0;
       const letters = (String(line.text || '').match(/\p{L}/gu) || []).length;
       if (letters >= 8 && ms < 250) {
+        this._fastSilent = (this._fastSilent || 0) + 1;
         if (!this._fastSilentHinted) {
           this._fastSilentHinted = true;
           toast('Голос ответил мгновенно — похоже, движок молчит: ⚙ → «Проверить голос»', 8000);
         }
+        // Вторая «мгновенная» реплика подряд — движок не говорит вовсе.
+        // Раньше очередь доходила до конца, и приложение бодро сообщало
+        // «Страница 1 дочитана. ▶ — следующая», хотя не прозвучало ни слова
+        // (телефон 06.11, 12:21). Останавливаемся и говорим прямо.
+        if (this._fastSilent >= 2) {
+          this.stop();
+          toast('Голос не говорит — остановился, страница НЕ дочитана. ⚙ → «Проверить голос»', 9000);
+          return;
+        }
         if (then) then();
         return;
       }
+      this._fastSilent = 0;
       marked = true;
       try { Reader.markSpoken(Reader.page, line); } catch (e) { /* не критично */ }
       if (then) then();
@@ -14128,6 +14178,10 @@ async function selfCheck() {
   // Флаг для аварийного пробника в начале страницы: приложение действительно
   // пошло. Без него он не может отличить «скрипты не выполнились» от «работает».
   try { window.__komaBoot = VERSION; } catch (e) {}
+  // Синтез речи греем сразу при запуске: список голосов запрашиваем здесь, а
+  // разблокировку — на первом касании экрана. Просьба 06.11, 12:22: «до
+  // открытия книги уже держи tts включённым, чтобы задержка была поменьше».
+  try { if (typeof TTS !== 'undefined' && TTS.prewarm) TTS.prewarm(); } catch (e) { /* не критично */ }
   // Надпись «Скрипты страницы не выполнились» — аварийная, для случая, когда не
   // выполнился НИ ОДИН скрипт. Как только boot начался, она врёт: меняем на
   // «Загрузка», а итог пишет selfCheck в конце.

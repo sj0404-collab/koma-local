@@ -15,7 +15,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.88';
+const VERSION = 'v1.9.89';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -987,6 +987,13 @@ function libGoTab(tab) {
  * вовсе: тап по книге молча ничего не делал. Ошибки теперь видно, а не в консоли.
  */
 async function openBook(book) {
+  // Голос держим наготове ДО открытия книги (просьба 06.11, 12:22): тап по
+  // главе — это уже жест, значит синтезатор можно разблокировать здесь, а не
+  // в момент ▶. Задержка первой реплики уходит.
+  try {
+    if (typeof TTS !== 'undefined' && TTS.prewarm) TTS.prewarm();
+    if (typeof TTS !== 'undefined' && TTS.prime) TTS.prime();
+  } catch (e) { /* голос не должен мешать открытию книги */ }
   try {
     await Reader.open(book);
     await Library.touch(book);
