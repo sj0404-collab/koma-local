@@ -514,8 +514,8 @@ const Reader = {
     const fresh = cached && (band ? (hasBands && bandMap.has(bandKey)) : !hasBands);
     if (cached && fresh && !force) { this.paintPage(i); return cached; }
 
-    if (silent && (State.scanning || State.prefetching)) return null;
-    if (State.scanning && !silent) {
+    if (silent && !opts.internal && (State.scanning || State.prefetching)) return null;
+    if (State.scanning && !silent && !opts.internal) {
       // Молча выходить нельзя: нажатие «Распознать заново» выглядело как
       // «кнопка не работает». Ставим в очередь и говорим об этом.
       State.pendingScan = { i, force, keepSheet, full: !!opts.full };
@@ -525,8 +525,20 @@ const Reader = {
       return null;
     }
 
-    const c = this.canvases[i];
+    let c = this.canvases[i];
     if (!c) { toast('Страница ' + (i + 1) + ' ещё не загрузилась'); return null; }
+    // Пустой кадр (ширина/высота 0) — это ещё не нарисованная страница. Раньше
+    // распознавание запускалось сразу и читало «ничего»: человек видел, что
+    // первый проход взял не весь текст, а после прокрутки туда-обратно всё
+    // сходилось (телефон 06.11, 10:01). Ждём явно, до 2,5 с.
+    if (!c.width || !c.height) {
+      for (let w = 0; w < 25; w++) {
+        await new Promise(r => setTimeout(r, 100));
+        c = this.canvases[i];
+        if (c && c.width && c.height) break;
+      }
+      if (!c || !c.width || !c.height) { toast('Страница ' + (i + 1) + ' ещё рисуется — попробуйте ещё раз'); return null; }
+    }
     if (!OCR.ready) {
       // Раньше шторка «Модели» открывалась ПУСТОЙ: состояние рисует renderModels,
       // а её здесь никто не звал. На скриншоте с телефона 28.10 так и было —
@@ -556,8 +568,9 @@ const Reader = {
             : (okTotal ? `Распознаём… ${Math.min(total, Math.max(1, Math.ceil(done)))}/${total}` : 'Распознаём…'));
         $('#scanBadge').textContent = t;
         if (keepSheet) {
+          const dDone = Math.round(Number(done) || 0), dTotal = Math.round(Number(total) || 0);
           $('#textStats').textContent = (okDone && okTotal)
-            ? `Распознаю ${label} заново… ${done}/${total}`
+            ? `Распознаю ${label} заново… ${dDone}/${dTotal}`
             : `Распознаю ${label} заново…` + (phase ? ' ' + phase : '');
         }
       }, band, opts.det || null);
@@ -594,8 +607,9 @@ const Reader = {
         OCR.readPlan = 'native';
       } else {
         fresh = readingOrder(res.regions, rtl, true, RULES)
+          .filter(l => !isAppToastText(l.text))     // своя плашка — не реплика
           .map(l => ({ ...l, text: polishLineText(String(l.text || '')) }))
-          .filter(l => l.text);
+          .filter(l => l.text && !isAppToastText(l.text));
         OCR.readPlan = 'page';
       }
       // Края реплик чистим ЗДЕСЬ, на выходе распознавания: обрывок звукового
@@ -637,6 +651,38 @@ const Reader = {
       const detPass = res.detPass || 'normal';
       const largePasses = res.largePasses || 0;
       this.bandCache.set(i, bandMap);
+      // ── Полнота полосы ────────────────────────────────────────────────────
+      // Первый проход иногда успевает разобрать только верхнюю часть кадра:
+      // распознавание шло, пока страница ещё дорисовывалась, и низ выпадал.
+      // Человек видел «прочитало не всё», прокручивал вниз-вверх, и второй
+      // проход подхватывал остаток (телефон 06.11, 10:01). Догоняем САМИ:
+      // если в полосе ниже последней найденной строки есть краска, а реплик
+      // нет — распознаём этот кусок отдельно и приклеиваем к полосе. Границы
+      // полосы не расширяются, лишнего (того, чего не видно) не читаем.
+      if (band && !opts.tail && !opts.full) {
+        try {
+          const bottoms = (res.regions || []).map(r => Number(r.bottom) || 0);
+          const lastBottom = bottoms.length ? Math.max(...bottoms) * c.height : band.y0;
+          const tailFrom = Math.round(Math.max(band.y0, lastBottom));
+          const tailH = Math.round(band.y1) - tailFrom;
+          const bandH = Math.round(band.y1 - band.y0);
+          const ink = this.inkRows(i);
+          const darkInTail = () => {
+            if (!ink) return true;                       // нет карты — считаем, что текст есть
+            const row = (px) => clamp(Math.round(px / c.height * ink.h), 0, ink.h - 1);
+            const a = row(tailFrom), b = row(band.y1);
+            for (let r = a; r <= b; r++) if (ink.dark[r] < 200) return true;
+            return false;
+          };
+          if (tailH > Math.max(200, bandH * 0.2) && darkInTail()) {
+            await this.scanCurrent(i, {
+              bandPx: { y0: tailFrom, y1: band.y1, vy0: band.vy0, vy1: band.vy1,
+                        key: bandKey + ':tail' + Math.round(tailFrom) },
+              silent: true, internal: true, tail: true, force: true,
+            });
+          }
+        } catch (e) { console.warn('дочитывание полосы', e); }
+      }
       const parts = Array.from(bandMap.entries())
         .sort((a, b) => {
           const ya = a[1].res.band ? a[1].res.band.y0 : 0;
@@ -1970,7 +2016,11 @@ const TTS = {
     // включая то, что уже было прочитано раньше. Раньше отметки «прочитано»
     // соблюдались и при явном нажатии: страница молча ждала, пока дойдёшь до
     // места, где остановился в прошлый раз (жалоба с телефона 22:41).
-    const fromStart = !!opts.fromStart;
+    // Новый запуск (после стопа или после листания) всегда читает С НАЧАЛА
+    // видимой полосы. Раньше соблюдались отметки «прочитано» из прошлого
+    // прохода, и после возврата наверх читалка начинала с третьей реплики,
+    // хотя первые две человек видел (телефон 06.11, 10:02).
+    const fromStart = opts.fromStart === undefined ? !!this.stopped : !!opts.fromStart;
     // Если страница ещё не распознана — сначала распознать, потом читать.
     // Раньше в этот момент вылезало «На этой полосе нет распознанного текста»
     // прямо во время сканирования, хотя текст вот он.

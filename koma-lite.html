@@ -991,7 +991,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.81';
+const VERSION = 'v1.9.84';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -2041,7 +2041,10 @@ const DEFAULT_RULES = {
   breakWords: true,        // дочинивать отдельные слова по кропу
   pipeline: true,          // читать, не дожидаясь конца полосы (замер в part4.js)
   hardVariants: true,      // на трудных строках перебирать подготовки и второй распознаватель
-  autoScan: false,         // распознавать САМО при открытии и прокрутке? по умолчанию нет
+  // Распознавать САМО при открытии, прокрутке и листании. Раньше по умолчанию
+  // было «нет», и человек видел пустой текст, пока сам не нажмёт «Распознать».
+  // Просьба 06.11: «чтобы при каждом листании страницы авто подхватывал».
+  autoScan: true,
   // Читать дальше САМО, когда реплики страницы кончились? По умолчанию нет.
   // Жалоба 4.11: «не меняя страницу, он сам в фоне читает уже следующие» —
   // человек слушал страницу 2, а голос уезжал на страницу 3 без его команды.
@@ -2143,7 +2146,9 @@ function sanitizeRules(r, overrides) {
   num('maxVariants', 1, 8);
   num('variantStopShare', 0.5, 1);
   R.uncoveredPass = R.uncoveredPass !== false;
-  R.autoScan = R.autoScan === true;                        // по умолчанию НЕ само
+  // Не задано — значит ДА: страница читает видимую полосу сама. Явное «нет»
+  // из сохранённых настроек уважаем (галочка в ⚙ остаётся).
+  R.autoScan = R.autoScan === undefined ? true : R.autoScan === true;
   R.autoPage = R.autoPage === true;                        // дальше страницы — только по ▶
   R.extCrop = R.extCrop === false ? false : (R.extCrop === true ? true : 'light');
   R.breakWords = R.breakWords !== false;
@@ -2371,17 +2376,47 @@ function cyrifyInsideWords(text) {
 function splitGluedWords(text) {
   const src = String(text || '');
   if (!src) return src;
+  // «Настоящее слово» — то, что в словаре ЧАСТОЕ (Words.isKnown), а не просто
+  // «есть в словаре на 487 000 словоформ»: там есть и «тверд», и «ию», и
+  // «панг», поэтому «ПОДТВЕРД.» резалось на «ПОД ТВЕРД.», а «Пангию» — на
+  // «Панг ию» (телефон 06.11, 10:02).
   const known = (w) => (typeof Words !== 'undefined' && Words)
-    ? (Words.isKnown(w) || (Words.inDict && Words.inDict(w))) : false;
+    ? (typeof Words.isKnown === 'function' ? Words.isKnown(w) : (!!Words.inDict && Words.inDict(w)))
+    : false;
   return src.split(' ').map(word => {
     const core = word.replace(/[^\p{L}]/gu, '');
     if (core.length < 5 || !/^[А-Яа-яЁё]+$/.test(core)) return word;
-    if (known(core.toLowerCase())) return word;
+    // Целое словарное слово не режем НИКОГДА — даже редкое: «ПЕРЕВЕЛАСЬ» есть
+    // в словаре, а halves «ПЕРЕВЕЛ»+«АСЬ» тоже словарные, и резалка давала
+    // «ПЕРЕВЕЛ АСЬ».
+    const whole = (typeof Words !== 'undefined' && Words)
+      ? (Words.inDict && Words.inDict(core.toLowerCase())) : false;
+    if (whole || known(core.toLowerCase())) return word;
+    // Режем по САМОЙ частой паре, а не по первой подходящей, и только если
+    // обе половины — настоящие слова по 3+ буквы. Раньше хватало любого
+    // совпадения: «Пангию» → «Панг ию» (ию — словарное «ию»), и в реплику
+    // уходило «Разве не он выбросил Пангию…» → «…Панг» (телефон 06.11).
+    let best = null, bestScore = Infinity;
+    const veryCommon = (w) => {
+      const r = (Words.rank && Words.rank.get(w));
+      return r !== undefined && r <= 200;
+    };
     for (let i = 2; i <= core.length - 2; i++) {
-      const a = core.slice(0, i), b = core.slice(i);
-      if (known(a.toLowerCase()) && known(b.toLowerCase())) {
-        return word.replace(core, a + ' ' + b);
-      }
+      const a = core.slice(0, i).toLowerCase(), b = core.slice(i).toLowerCase();
+      if (!known(a) || !known(b)) continue;
+      // Обе половины по 3+ буквы — обычный случай. Или короткая половина —
+      // очень частое слово («ты», «я», «не»), а вторая длинная: «ТЫМОЖЕШЬ»
+      // → «ТЫ МОЖЕШЬ». «Пангию» при этом не режется: «ию» не частотное.
+      const short = Math.min(a.length, b.length), long = Math.max(a.length, b.length);
+      if (short < 3 && !(long >= 4 && veryCommon(short === a.length ? a : b))) continue;
+      const ra = Words.rank ? Words.rank.get(a) : undefined;
+      const rb = Words.rank ? Words.rank.get(b) : undefined;
+      const score = (ra === undefined ? 1e6 : ra) + (rb === undefined ? 1e6 : rb);
+      if (score < bestScore) { bestScore = score; best = i; }
+    }
+    if (best) {
+      const a = core.slice(0, best), b = core.slice(best);
+      return word.replace(core, a + ' ' + b);
     }
     return word;
   }).join(' ');
@@ -2582,7 +2617,20 @@ function repairWordsByDict(text) {
   return String(text || '').replace(/[А-Яа-яЁё]{4,}/g, (w) => {
     const fix = dictNearest(w);
     if (!fix) return w;
-    return w === w.toUpperCase() ? fix.toUpperCase() : fix;
+    const a = w.toLowerCase(), b = String(fix).toLowerCase();
+    if (a === b) return w;
+    // Словарь — не цензор. Две проверки отсекают «исправления», которые на
+    // самом деле калечат слово:
+    //  • обрезкa хвоста: «Пангию» → «Панг» (потеряно 2+ буквы в конце) — имя
+    //    собственное из манги, словарю его не знать;
+    //  • чужое слово с тем же началом: «СО-БИРАЛСЯ» → «СО-БОРОЛСЯ» (общий
+    //    префикс — одна буква, дальше другое слово).
+    if (b.length < a.length - 2) return w;
+    // Регистр исходника важнее словаря: «СЛАВАвв» — это «СЛАВА», а не «слава».
+    const caps = (w.match(/[А-ЯЁ]/g) || []).length;
+    const lower = (w.match(/[а-яё]/g) || []).length;
+    const shouty = caps > 0 && caps >= lower;
+    return shouty ? String(fix).toUpperCase() : fix;
   });
 }
 
@@ -2614,8 +2662,14 @@ function mergeSplitTokens(text) {
     // «ИЗ-ЗА» — настоящее слово С ДЕФИСОМ (частота 183), и разрывать его нельзя:
     // проверять надо само слово с дефисом, а не слипшуюся форму «изза».
     if (Words.rank.has(out[i].toLowerCase())) continue;
+    // Разрываем ТОЛЬКО когда слитная форма — известное слово («ПОДР-УШ» →
+    // «ПОДРУШ»). Если словарь слитной формы не знает, дефис настоящий, его
+    // поставил автор: «РИ-ОНИ», «ХА-А», «ЭЙ-ТЫ». Раньше разрезалось всё
+    // неизвестное, и в реплику уходило «РИ ОНИ» вместо «РИ-ОНИ» (06.11).
     const r = Words.rank.get((m[1] + m[2]).toLowerCase());
-    if (r !== undefined && r <= Words.KNOWN_RANK) continue;
+    const joinedKnown = r !== undefined && r <= Words.KNOWN_RANK;
+    const tailKnown = Words.rank.has(m[2].toLowerCase());
+    if (!joinedKnown && tailKnown) continue;    // «РИ-ОНИ», «ХА-А»
     out.splice(i, 1, m[1], m[2]);
   }
   for (let pass = 0; pass < 3; pass++) {
@@ -2894,6 +2948,53 @@ function dropLetterNameTail(text) {
   return tokens.join(' ');
 }
 
+/**
+ * Слово, разрезанное переносом БЕЗ дефиса, где первая половина кончается точкой
+ * («ПОДТВЕРД.» + «ДИЛИСЬ»): буква на стыке повторяется, движок читает её дважды
+ * и режет слово. Склеиваем по перекрытию — но только если получилось настоящее
+ * слово по словарю. Иначе оставляем как есть: точка могла быть и концом фразы.
+ */
+function glueOverlapWords(text) {
+  const src = String(text || '');
+  if (typeof Words === 'undefined' || !Words.ready) return src;
+  const parts = src.split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return src;
+  const out = [];
+  for (let i = 0; i < parts.length; i++) {
+    const a = parts[i];
+    const m = /^([А-Яа-яЁё]{4,})[.\-]$/u.exec(a);
+    const nb = i + 1 < parts.length ? /^([А-Яа-яЁё]+)([^А-Яа-яЁё]*)$/u.exec(parts[i + 1]) : null;
+    if (m && nb) {
+      const head = m[1], rest = nb[1], tail = nb[2];
+      let done = false;
+      // k = 0 — самый частый случай: чтец потерял букву на стыке и поставил
+      // точку вместо неё («ПОДТВЕР.» + «ДИЛИСЬ» → «ПОДТВЕРДИЛИСЬ»). k = 1–2 —
+      // когда буква прочитана дважды. Всё проверяется словарём: без готового
+      // слова склейки нет, поэтому точка в конце фразы ничего не съест.
+      for (let k = 0; k <= Math.min(2, rest.length - 2); k++) {
+        const cand = head + rest.slice(k);
+        if (Words.inDict(cand.toLowerCase()) || Words.isKnown(cand.toLowerCase())) {
+          out.push(cand + tail);
+          i++;
+          done = true;
+          break;
+        }
+      }
+      if (done) continue;
+    }
+    out.push(a);
+  }
+  return out.join(' ');
+}
+
+/** Строка — служебная плашка приложения, а не текст страницы. */
+function isAppToastText(text) {
+  const t = String(text || '');
+  return /(Полоса|Страница)\s*\d+\s*(распознана|обновлена|распознаётся)/i.test(t)
+      || /реплик\s*[·,]\s*всего\s*\d+/i.test(t)
+      || /\d+\s*реплик\s*·\s*\d+([.,]\d+)?\s*с/.test(t);
+}
+
 function polishLineText(raw) {
   let text = String(raw || '').replace(/\u00AD/g, '-').replace(/\s+/g, ' ').trim();
   if (!text) return '';
@@ -2915,6 +3016,7 @@ function polishLineText(raw) {
   text = mergeSplitTokens(text);
   text = spliceFragmentRuns(text);
   text = glueBrokenHalves(text);
+  text = glueOverlapWords(text);
   text = glueSplitWords(text);
   text = fixConfusedShortWords(text);
   text = repairWordsByDict(text);
@@ -2924,7 +3026,18 @@ function polishLineText(raw) {
   // Фразы чиним ПОСЛЕ слов: словарь уже успел испортить «СЛАВА» → «СЛАБА».
   text = fixPhrases(text);
   text = dropLetterNameTail(text);
-  return trimJunkEdges(text).trim();
+  const polished = trimJunkEdges(text).trim();
+  // Страховка от «умной» чистки: словарь чинит слова, но не выбрасывает смысл.
+  // На телефоне 06.11 «ХОТЬ Я И ОЖИДАЛА ЧЕГО-ТО ПОДОБНОГО…» превращалось в
+  // «ХОТЬ ОЖИДАЛА ЧЕ ГОТО ПОДОБНОГО…», а «Разве не он выбросил Пангию…» — в
+  // «…Панг». Правило простое: потеряли больше пятой части букв — оставляем
+  // исходную строку (сняв только лишние пробелы).
+  const letters = (t) => (String(t).match(/[А-Яа-яЁё]/g) || []).length;
+  const rawLetters = letters(raw);
+  if (rawLetters >= 6 && letters(polished) < rawLetters * 0.8) {
+    return String(raw).replace(/\s+/g, ' ').trim();
+  }
+  return polished;
 }
 
 /** Строка состоит ТОЛЬКО из символов-двойников: «OHO», «4YBC», «MHE TAK». */
@@ -3034,14 +3147,32 @@ function fixCaseInCaps(text) {
 }
 
 function cleanSpeech(raw) {
+  const dictHas = (w) => (typeof Words !== 'undefined' && Words && Words.rank && Words.rank.has(w));
   let text = String(raw || '')
-    .replace(/(?<=\p{L})\s*-\s*(?=\p{L})/gu, '')
+    // Дефис на переносе («СО-БИРАЛСЯ», «ВОЛ-НУЕТСЯ») склеиваем, а НАСТОЯЩИЙ
+    // дефис автора — нет: раньше «ЧЕГО-ТО» превращалось в «ЧЕГОТО», «ХА-А» и
+    // «РИ-ОНИ» теряли дефис и выпадали из реплики (телефон 06.11, 10:02).
+    // Признак честный, по словарю: если слитная форма словарная, а дефисная —
+    // нет, дефис был переносом.
+    .replace(/(\p{L}+)\s*-\s*(\p{L}+)/gu, (m, a, b) => {
+      const joined = (a + b).toLowerCase(), hyph = (a + '-' + b).toLowerCase();
+      return (dictHas(joined) && !dictHas(hyph)) ? a + b : a + '-' + b;
+    })
     .replace(/\s+/g, ' ')
     .trim();
   text = isLookalikeOnly(text) ? fixLookalikesForced(text) : fixLookalikes(text);
   text = fixCaseInCaps(text);
+  // Склейка разорванного слова из однобуквенных обрывков («ВЛ И ТЬ» →
+  // «ВЛИТЬ»). Но «Я», «И», «А», «В», «С», «У», «О», «К» — самостоятельные
+  // слова, и склеивать их нельзя: «ХОТЬ Я И ОЖИДАЛА» → «ХОТЬ ЯИОЖИДАЛА», после
+  // чего «Я И» выпадали из реплики (телефон 06.11, 10:02).
+  const soloWords = /^[ЯИАВСУОК]$/i;
   for (let k = 0; k < 3; k++) {
-    text = text.replace(/(?<!\p{L})\p{L}(\s+\p{L}){1,4}(?!\p{L})/gu, m => m.replace(/\s+/g, ''));
+    text = text.replace(/(?<!\p{L})\p{L}(\s+\p{L}){1,4}(?!\p{L})/gu, m => {
+      const letters = m.split(/\s+/);
+      if (letters.every(ch => soloWords.test(ch))) return m;
+      return m.replace(/\s+/g, '');
+    });
   }
   // Перенос по слогам без дефиса: «ВЛ ИТЬ» → «ВЛИТЬ», «ВОЛ НУ ЕТСЯ» → «ВОЛНУЕТСЯ».
   // Делается ПОСЛЕ склейки однобуквенных обрывков: там правило совсем узкое
@@ -3704,6 +3835,10 @@ const Words = {
     let t = joinHyphens(String(text || ''));
     // Дефис, прочитанный как точка: «ЕЁ ВЕ. ЛИЧЕСТВО» → «ЕЁ ВЕЛИЧЕСТВО».
     t = joinShortDot(this, t);
+    // Слово, разрезанное переносом БЕЗ дефиса, склеиваем ДО словарной правки:
+    // иначе «ПОДТВЕРД. ДИЛИСЬ» чинится по частям и в реплику уходит
+    // «ПОДТВЕРД. ДЕЛИСЬ» (телефон 06.11, 10:02).
+    if (this.ready) t = glueOverlapWords(t);
     // Латиница, которая на самом деле кириллица, и латинский шум — ДО разбивки
     // слипшихся слов: иначе «СЛУШАЙТЕЕУ.owb» сначала делится на «слуша» +
     // «йтЕЕУ.owb» (10 кириллических букв) и латинский хвост уже не отделить.
@@ -3815,6 +3950,15 @@ const Words = {
     if (before >= 3 && after < before * 0.6) {
       const kept = this.finish(raw, true);
       if (kept) fixed = kept;
+    }
+    // Второй счёт — по БУКВАМ: слипшиеся слова чистка выкидывает целиком, а
+    // число «слов» при этом не меняется («у негобылоникакойпривя занностик
+    // своим детям» → «у занностик своим детям»). Потеря букв видна сразу.
+    const cnt = (t) => (String(t).match(/[А-Яа-яЁё]/g) || []).length;
+    const rawCnt = cnt(raw), fixCnt = cnt(fixed);
+    if (rawCnt >= 10 && fixCnt < rawCnt * 0.8) {
+      const kept = this.finish(raw, true);
+      if (kept && cnt(kept) > fixCnt) fixed = kept;
     }
     if (knownLong.length >= 1) return fixed;                     // есть настоящие слова
 
@@ -5562,8 +5706,17 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   // полосу. По правилу «длинную страницу читать в пределах видимой области»
   // иначе на вебтуне в 8000 px находились реплики на два экрана вперёд.
   let src = imgCanvas;
-  const y0 = band ? Math.max(0, Math.round(band.y0)) : 0;
-  const y1 = band ? Math.min(imgCanvas.height, Math.round(band.y1)) : imgCanvas.height;
+  // Полоса рисуется С ПОЛЯМИ. Раньше кадр был ровно y0…y1, и строка, которую
+  // край экрана разрезал пополам, уезжала в распознавание половинкой:
+  // «ШОЕ СПАСИБО.» вместо «БОЛЬШОЕ СПАСИБО.» (телефон 06.11, 09:16), а строки
+  // выше края терялись целиком. Поля дают модели целые буквы, а видимость
+  // по-прежнему считается по РАМКЕ ЭКРАНА (band.vy0…vy1) — поэтому строка
+  // читается один раз и только в своей полосе.
+  const coreY0 = band ? Math.max(0, Math.round(band.y0)) : 0;
+  const coreY1 = band ? Math.min(imgCanvas.height, Math.round(band.y1)) : imgCanvas.height;
+  const margin = band ? Math.round(Math.min(220, Math.max(48, (coreY1 - coreY0) * 0.06))) : 0;
+  const y0 = band ? Math.max(0, coreY0 - margin) : 0;
+  const y1 = band ? Math.min(imgCanvas.height, coreY1 + margin) : imgCanvas.height;
   const bandH = Math.max(1, y1 - y0);
   if (band && (y0 > 0 || y1 < imgCanvas.height)) {
     const c = makeCanvas(imgCanvas.width, bandH);
@@ -5690,6 +5843,8 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   let largePasses = 0;
 
   const decodeLine = async (canvas, ln, wide, opts) => {
+    // opts.softR — правила для мягкого повтора (без обрезки полей кропа).
+    const sR = (opts && opts.softR) ? { ...R, ...opts.softR } : R;
     const w = Math.max(1, ln.right - ln.left), h = Math.max(1, ln.bottom - ln.top);
     const c = makeCanvas(w, h);
     c.getContext('2d', { willReadFrequently: true })
@@ -5697,7 +5852,7 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     crops++;
     // Перед распознаванием убираем из кропа обрезки соседних строк (см.
     // trimCropToInk): без этого модель читала два текста сразу.
-    const trimmed = R.trimCrop === false ? c : trimCropToInk(c);
+    const trimmed = sR.trimCrop === false ? c : trimCropToInk(c);
     const ckey = _cropKey(trimmed, wide, R);
     const hit = textCacheGet(ckey);
     if (hit) return hit;
@@ -5813,13 +5968,36 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     const items = [];
     for (let li = 0; li < lines.length; li++) {
       const ln = lines[li];
-      if (onProgress && det.boxes.length)
-        onProgress(done + (li + 1) / (lines.length + 1), det.boxes.length);
+      // Только целые: раньше сюда уходила дробь (done + 1.5/3), и в строке
+      // прогресса появлялось «0.13333333» на три секунды (телефон 06.11, 10:01).
+      if (onProgress && det.boxes.length) onProgress(done + 1, det.boxes.length);
       await yieldUI();
       const wide = (ln.right - ln.left) / W >= 0.25;   // реплика, а не звук
-      // Край полосы: строка могла быть разрезана границей экрана.
-
+      // Край полосы: строка могла быть разрезана границей экрана. Поля вокруг
+      // полосы (см. margin выше) обычно это закрывают; если строка всё ещё
+      // липнет к краю кадра — дочитываем её кропом, расширенным в сторону
+      // страницы, а не обрезком. Без этого из «БОЛЬШОЕ СПАСИБО.» получалось
+      // «ШОЕ СПАСИБО.» (телефон 06.11, 09:16).
+      const atTop = ln.top <= 2 && y0 > 0;
+      const atBottom = ln.bottom >= src.height - 2 && y1 < imgCanvas.height;
       let { text, conf } = await decodeLine(src, ln, wide);
+      if ((atTop || atBottom) && band) {
+        const w = Math.max(1, ln.right - ln.left);
+        const eh = Math.max(16, Math.round((ln.bottom - ln.top) * 0.5));
+        const pt = Math.max(0, y0 + ln.top - (atTop ? eh : 0));
+        const pb = Math.min(imgCanvas.height, y0 + ln.bottom + (atBottom ? eh : 0));
+        if (pb - pt > 2) {
+          const c = makeCanvas(w, pb - pt);
+          c.getContext('2d', { willReadFrequently: true })
+            .drawImage(imgCanvas, ln.left, pt, w, pb - pt, 0, 0, w, pb - pt);
+          crops++;
+          const trimmed = R.trimCrop === false ? c : trimCropToInk(c);
+          const alt = await decodeBetter(trimmed, R, { wide });
+          if (alt && alt[0] && textScore(alt[0], alt[1]) > textScore(text, conf)) {
+            text = alt[0]; conf = alt[1];
+          }
+        }
+      }
       // Битые слова дочиниваем по одному, верные — не трогаем.
       if (R.breakWords !== false && wide && text && !allWordsKnown(text)) {
         const crop = makeCanvas(Math.max(1, ln.right - ln.left), Math.max(1, ln.bottom - ln.top));
@@ -5886,6 +6064,15 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     // Текст не теряем: принимаем второй проход, только если он сохранил хотя
     // бы 80 % букв (иначе из титула пропадали строки).
     if (!alt.items.length || lettersOf(alt.items.map(i => i.text)) < letters * 0.8) continue;
+    // Обрезок на широком блоке — это не «более точное чтение», а потеря:
+    // «Разве не он выбросил таким образом Пангию…» подменялось словом «разве»,
+    // а абзац из четырёх строк — фразой «Если так подумать, у своим детям.»
+    // (телефон 06.11, 10:02). Если первый проход дал три слова и больше, второй
+    // обязан оставить хотя бы столько же слов и 90 % букв.
+    const wordsOf = (arr) => arr.join(' ').split(/\s+/).filter(w => (w.match(/\p{L}/gu) || []).length >= 2).length;
+    const altWords = wordsOf(alt.items.map(i => i.text));
+    const firstWords = wordsOf(firstTexts);
+    if (firstWords >= 3 && (altWords < firstWords || lettersOf(alt.items.map(i => i.text)) < letters * 0.9)) continue;
     // Если второй проход набрал заметно больше букв, это почти всегда дубль
     // («… будучи старшей жизнь, Оцачит старшей сестрой тирана»), а не более
     // точное чтение: такую замену не берём.
@@ -5895,7 +6082,43 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
       entry.items = alt.items;
     }
   }
-  for (const entry of byBox) for (const item of entry.items) regions.push(item);
+  // ── Проход 1б: блоки, где не прочиталось НИЧЕГО. Раньше такой блок молча
+  // исчезал из реплик: человек видел «3 блоков · 1 строка» и терял облачко
+  // целиком. Пробуем мягче — половинный порог уверенности и кроп без обрезки
+  // полей; берём только то, что похоже на текст (есть буквы, не мусор).
+  const softMin = Math.max(0.06, (Number(R.minConfidence) || 0.25) * 0.5);
+  for (const entry of byBox) {
+    if (entry.items.length) continue;
+    const lines = textLines(src, entry.box, R).filter(visible);
+    for (const ln of lines) {
+      const wide = (ln.right - ln.left) / W >= 0.25;
+      await yieldUI();
+      let { text, conf } = await decodeLine(src, ln, wide, { skipExt: true, softR: { trimCrop: false } });
+      if (!text || !text.trim() || conf <= softMin) continue;
+      if (typeof looksLikeJunkLine === 'function' && looksLikeJunkLine(text, R)) continue;
+      if ((text.match(/\p{L}/gu) || []).length < 2) continue;
+      entry.items.push({
+        text,
+        left: ln.left / W, top: (y0 + ln.top) / imgCanvas.height,
+        right: ln.right / W, bottom: (y0 + ln.bottom) / imgCanvas.height,
+        confidence: conf,
+        soft: true,
+        box: {
+          left: entry.box.left / W, top: (y0 + entry.box.top) / imgCanvas.height,
+          right: entry.box.right / W, bottom: (y0 + entry.box.bottom) / imgCanvas.height,
+        },
+      });
+    }
+  }
+
+  // Сколько найденных блоков осталось без текста: раньше они молча исчезали,
+  // и «3 блоков · 1 строка» выглядело как норма (телефон 06.11).
+  let unreadBoxes = 0;
+  for (const entry of byBox) {
+    const got = entry.items.filter(it => it && it.text && it.text.trim());
+    if (!got.length) unreadBoxes++;
+    for (const item of entry.items) regions.push(item);
+  }
 
   // ── Проход 3: то, что детектор не закрыл боксами. Дешёвый поиск полос с
   // «чернилами» без боксов; если в такой полосе нашлись строки — распознаём.
@@ -5938,7 +6161,7 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
   const clean = regions.filter(r => !inChrome(r, chrome));
 
   return {
-    regions: clean, chrome, boxes: det.boxes.length,
+    regions: clean, chrome, boxes: det.boxes.length, unreadBoxes,
     ms: Math.round(performance.now() - t0),
     detMs, recMs: Math.round(performance.now() - t1), crops,
     band: band ? { y0, y1 } : null,
@@ -6404,7 +6627,12 @@ function bubblesOf(group, rtl, R) {
         const last = text[text.length - 1];
         if (last === '-' || last === '\u00AD') text = text.slice(0, -1);
         else if (joinBrokenWord(text, t)) text = text.replace(/[.\-]$/, '');   // «БУДЕ.» + «ТЕ» → «БУДЕТЕ»
-        else if (!(t.length <= 2 && /\p{L}$/u.test(prev) && /^\p{L}/u.test(t))) text += ' ';
+        // Одиночная буква-слово («Я», «И», «А», «В») — это НЕ обрывок слова:
+        // приклеивать к ней следующую часть нельзя, иначе «ХОТЬ Я И ОЖИДАЛА»
+        // превращается в «ХОТЬ ЯИОЖИДАЛА» и слова выпадают из реплики
+        // (телефон 06.11, 10:02 — читалось «ХОТЬ ОЖИДАЛА ЧЕГО-ТО…»).
+        else if (!(t.length <= 2 && /\p{L}$/u.test(prev) && !/^[ЯИАВСУОК]$/iu.test(prev)
+                   && /^\p{L}/u.test(t))) text += ' ';
       }
       text += t;
     });
@@ -7757,11 +7985,11 @@ const Reader = {
     if (y1 - y0 < 32) return null;
     // Если видно (почти) всю страницу — полоса не нужна
     if (y1 - y0 >= c.height * 0.92) return null;
-    // Короткая страница (до 2,2 экрана) читается ЦЕЛИКОМ — как оригинальный
-    // KOMA: на скриншоте 11:24 оригинал нашёл 18 областей и 5 реплик на всю
-    // страницу, включая «В БУДУЩЕМ, КОГДА ВЫ БУДЕТЕ…» за нижним краем экрана.
-    // Полоса нужна только вебтуну в десятки тысяч пикселей.
-    if (c.height <= viewH * 2.2) return null;
+    // Раньше страница до 2,2 экрана читалась ЦЕЛИКОМ — и в реплики попадал
+    // текст, которого человек ещё не видит: «подхватил то, что гораздо ниже
+    // того, что я вижу» (телефон 06.11, 09:35). Просьба прямая: подхватывать
+    // ровно то, что в кадре. Поэтому исключения больше нет — полоса всегда,
+    // если видно меньше 92 % страницы. Остальное дочитается при прокрутке.
     const vy0 = clamp(topPx * scale, 0, c.height);
     const vy1 = clamp(botPx * scale, 0, c.height);
     // Границы полосы прилипают к пустому месту страницы: иначе экран режет
@@ -7956,8 +8184,8 @@ const Reader = {
     const fresh = cached && (band ? (hasBands && bandMap.has(bandKey)) : !hasBands);
     if (cached && fresh && !force) { this.paintPage(i); return cached; }
 
-    if (silent && (State.scanning || State.prefetching)) return null;
-    if (State.scanning && !silent) {
+    if (silent && !opts.internal && (State.scanning || State.prefetching)) return null;
+    if (State.scanning && !silent && !opts.internal) {
       // Молча выходить нельзя: нажатие «Распознать заново» выглядело как
       // «кнопка не работает». Ставим в очередь и говорим об этом.
       State.pendingScan = { i, force, keepSheet, full: !!opts.full };
@@ -7967,8 +8195,20 @@ const Reader = {
       return null;
     }
 
-    const c = this.canvases[i];
+    let c = this.canvases[i];
     if (!c) { toast('Страница ' + (i + 1) + ' ещё не загрузилась'); return null; }
+    // Пустой кадр (ширина/высота 0) — это ещё не нарисованная страница. Раньше
+    // распознавание запускалось сразу и читало «ничего»: человек видел, что
+    // первый проход взял не весь текст, а после прокрутки туда-обратно всё
+    // сходилось (телефон 06.11, 10:01). Ждём явно, до 2,5 с.
+    if (!c.width || !c.height) {
+      for (let w = 0; w < 25; w++) {
+        await new Promise(r => setTimeout(r, 100));
+        c = this.canvases[i];
+        if (c && c.width && c.height) break;
+      }
+      if (!c || !c.width || !c.height) { toast('Страница ' + (i + 1) + ' ещё рисуется — попробуйте ещё раз'); return null; }
+    }
     if (!OCR.ready) {
       // Раньше шторка «Модели» открывалась ПУСТОЙ: состояние рисует renderModels,
       // а её здесь никто не звал. На скриншоте с телефона 28.10 так и было —
@@ -7998,8 +8238,9 @@ const Reader = {
             : (okTotal ? `Распознаём… ${Math.min(total, Math.max(1, Math.ceil(done)))}/${total}` : 'Распознаём…'));
         $('#scanBadge').textContent = t;
         if (keepSheet) {
+          const dDone = Math.round(Number(done) || 0), dTotal = Math.round(Number(total) || 0);
           $('#textStats').textContent = (okDone && okTotal)
-            ? `Распознаю ${label} заново… ${done}/${total}`
+            ? `Распознаю ${label} заново… ${dDone}/${dTotal}`
             : `Распознаю ${label} заново…` + (phase ? ' ' + phase : '');
         }
       }, band, opts.det || null);
@@ -8036,8 +8277,9 @@ const Reader = {
         OCR.readPlan = 'native';
       } else {
         fresh = readingOrder(res.regions, rtl, true, RULES)
+          .filter(l => !isAppToastText(l.text))     // своя плашка — не реплика
           .map(l => ({ ...l, text: polishLineText(String(l.text || '')) }))
-          .filter(l => l.text);
+          .filter(l => l.text && !isAppToastText(l.text));
         OCR.readPlan = 'page';
       }
       // Края реплик чистим ЗДЕСЬ, на выходе распознавания: обрывок звукового
@@ -8079,6 +8321,38 @@ const Reader = {
       const detPass = res.detPass || 'normal';
       const largePasses = res.largePasses || 0;
       this.bandCache.set(i, bandMap);
+      // ── Полнота полосы ────────────────────────────────────────────────────
+      // Первый проход иногда успевает разобрать только верхнюю часть кадра:
+      // распознавание шло, пока страница ещё дорисовывалась, и низ выпадал.
+      // Человек видел «прочитало не всё», прокручивал вниз-вверх, и второй
+      // проход подхватывал остаток (телефон 06.11, 10:01). Догоняем САМИ:
+      // если в полосе ниже последней найденной строки есть краска, а реплик
+      // нет — распознаём этот кусок отдельно и приклеиваем к полосе. Границы
+      // полосы не расширяются, лишнего (того, чего не видно) не читаем.
+      if (band && !opts.tail && !opts.full) {
+        try {
+          const bottoms = (res.regions || []).map(r => Number(r.bottom) || 0);
+          const lastBottom = bottoms.length ? Math.max(...bottoms) * c.height : band.y0;
+          const tailFrom = Math.round(Math.max(band.y0, lastBottom));
+          const tailH = Math.round(band.y1) - tailFrom;
+          const bandH = Math.round(band.y1 - band.y0);
+          const ink = this.inkRows(i);
+          const darkInTail = () => {
+            if (!ink) return true;                       // нет карты — считаем, что текст есть
+            const row = (px) => clamp(Math.round(px / c.height * ink.h), 0, ink.h - 1);
+            const a = row(tailFrom), b = row(band.y1);
+            for (let r = a; r <= b; r++) if (ink.dark[r] < 200) return true;
+            return false;
+          };
+          if (tailH > Math.max(200, bandH * 0.2) && darkInTail()) {
+            await this.scanCurrent(i, {
+              bandPx: { y0: tailFrom, y1: band.y1, vy0: band.vy0, vy1: band.vy1,
+                        key: bandKey + ':tail' + Math.round(tailFrom) },
+              silent: true, internal: true, tail: true, force: true,
+            });
+          }
+        } catch (e) { console.warn('дочитывание полосы', e); }
+      }
       const parts = Array.from(bandMap.entries())
         .sort((a, b) => {
           const ya = a[1].res.band ? a[1].res.band.y0 : 0;
@@ -9412,7 +9686,11 @@ const TTS = {
     // включая то, что уже было прочитано раньше. Раньше отметки «прочитано»
     // соблюдались и при явном нажатии: страница молча ждала, пока дойдёшь до
     // места, где остановился в прошлый раз (жалоба с телефона 22:41).
-    const fromStart = !!opts.fromStart;
+    // Новый запуск (после стопа или после листания) всегда читает С НАЧАЛА
+    // видимой полосы. Раньше соблюдались отметки «прочитано» из прошлого
+    // прохода, и после возврата наверх читалка начинала с третьей реплики,
+    // хотя первые две человек видел (телефон 06.11, 10:02).
+    const fromStart = opts.fromStart === undefined ? !!this.stopped : !!opts.fromStart;
     // Если страница ещё не распознана — сначала распознать, потом читать.
     // Раньше в этот момент вылезало «На этой полосе нет распознанного текста»
     // прямо во время сканирования, хотя текст вот он.
@@ -9897,6 +10175,7 @@ async function renderTextSheet(i) {
         ? `итого ${(Number(data.ms) || 0) / 1000 < 0.05 ? '?' : ((Number(data.ms) || 0) / 1000).toFixed(1)} с нативно (одним проходом)`
         : `итого ${((Number(data.ms) || 0) / 1000).toFixed(1)} с = детектор ${((Number(data.detMs) || 0) / 1000).toFixed(1)} с `
           + `+ распознавание ${((Number(data.recMs) || 0) / 1000).toFixed(1)} с`)
+      + (Number(data.unreadBoxes) > 0 ? ` · не прочитано блоков: ${data.unreadBoxes}` : '')
       + (data.bands > 1 ? ` · полос: ${data.bands}` : '')
       + (data.detPass && data.detPass !== 'normal'
         ? ' · детектор нашёл со 2-й попытки: ' + ({
@@ -10355,6 +10634,9 @@ async function onScrollSettled() {
 }
 function turnPage(dir) {
   const next = clamp(Reader.page + dir, 0, Reader.pages.length - 1);
+  // Новая страница в кадре → сразу распознаём именно её видимую часть.
+  // Иначе после листания человек видел прошлый текст, пока не тронет экран.
+  setTimeout(() => { try { onScrollSettled(); } catch (e) {} }, 350);
   if (Reader.mode === 'vertical') {
     const wrap = document.querySelector(`.pagewrap[data-page="${next}"]`);
     if (wrap) wrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -11574,7 +11856,11 @@ async function selfCheck() {
 // В песочнице (sandbox="allow-scripts" без allow-same-origin) даже чтение
 // navigator.serviceWorker бросает SecurityError — и человек видел «Ошибка: …».
 // Поэтому весь блок под try/catch: нет офлайн-кеша — просто идём дальше.
-if (/^https?:$/.test(location.protocol)) try {
+// Регистрируем только рядом с app-shell (index.html или корень): иначе одиночный
+// файл вроде koma-standalone.html просил несуществующий sw.js и в консоли
+// появлялся 404 — пусть и безвредный, но человек читает его как поломку.
+const isAppShell = /(\/|index\.html)$/.test(location.pathname);
+if (isAppShell && /^https?:$/.test(location.protocol)) try {
   if ('serviceWorker' in navigator) {
   // Регистрируем сразу, а не по событию load: скрипт стоит в конце документа,
   // к этому моменту DOM готов, а ждать load на 11-МБ странице — терять секунды.

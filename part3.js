@@ -362,17 +362,47 @@ function cyrifyInsideWords(text) {
 function splitGluedWords(text) {
   const src = String(text || '');
   if (!src) return src;
+  // «Настоящее слово» — то, что в словаре ЧАСТОЕ (Words.isKnown), а не просто
+  // «есть в словаре на 487 000 словоформ»: там есть и «тверд», и «ию», и
+  // «панг», поэтому «ПОДТВЕРД.» резалось на «ПОД ТВЕРД.», а «Пангию» — на
+  // «Панг ию» (телефон 06.11, 10:02).
   const known = (w) => (typeof Words !== 'undefined' && Words)
-    ? (Words.isKnown(w) || (Words.inDict && Words.inDict(w))) : false;
+    ? (typeof Words.isKnown === 'function' ? Words.isKnown(w) : (!!Words.inDict && Words.inDict(w)))
+    : false;
   return src.split(' ').map(word => {
     const core = word.replace(/[^\p{L}]/gu, '');
     if (core.length < 5 || !/^[А-Яа-яЁё]+$/.test(core)) return word;
-    if (known(core.toLowerCase())) return word;
+    // Целое словарное слово не режем НИКОГДА — даже редкое: «ПЕРЕВЕЛАСЬ» есть
+    // в словаре, а halves «ПЕРЕВЕЛ»+«АСЬ» тоже словарные, и резалка давала
+    // «ПЕРЕВЕЛ АСЬ».
+    const whole = (typeof Words !== 'undefined' && Words)
+      ? (Words.inDict && Words.inDict(core.toLowerCase())) : false;
+    if (whole || known(core.toLowerCase())) return word;
+    // Режем по САМОЙ частой паре, а не по первой подходящей, и только если
+    // обе половины — настоящие слова по 3+ буквы. Раньше хватало любого
+    // совпадения: «Пангию» → «Панг ию» (ию — словарное «ию»), и в реплику
+    // уходило «Разве не он выбросил Пангию…» → «…Панг» (телефон 06.11).
+    let best = null, bestScore = Infinity;
+    const veryCommon = (w) => {
+      const r = (Words.rank && Words.rank.get(w));
+      return r !== undefined && r <= 200;
+    };
     for (let i = 2; i <= core.length - 2; i++) {
-      const a = core.slice(0, i), b = core.slice(i);
-      if (known(a.toLowerCase()) && known(b.toLowerCase())) {
-        return word.replace(core, a + ' ' + b);
-      }
+      const a = core.slice(0, i).toLowerCase(), b = core.slice(i).toLowerCase();
+      if (!known(a) || !known(b)) continue;
+      // Обе половины по 3+ буквы — обычный случай. Или короткая половина —
+      // очень частое слово («ты», «я», «не»), а вторая длинная: «ТЫМОЖЕШЬ»
+      // → «ТЫ МОЖЕШЬ». «Пангию» при этом не режется: «ию» не частотное.
+      const short = Math.min(a.length, b.length), long = Math.max(a.length, b.length);
+      if (short < 3 && !(long >= 4 && veryCommon(short === a.length ? a : b))) continue;
+      const ra = Words.rank ? Words.rank.get(a) : undefined;
+      const rb = Words.rank ? Words.rank.get(b) : undefined;
+      const score = (ra === undefined ? 1e6 : ra) + (rb === undefined ? 1e6 : rb);
+      if (score < bestScore) { bestScore = score; best = i; }
+    }
+    if (best) {
+      const a = core.slice(0, best), b = core.slice(best);
+      return word.replace(core, a + ' ' + b);
     }
     return word;
   }).join(' ');
@@ -573,7 +603,20 @@ function repairWordsByDict(text) {
   return String(text || '').replace(/[А-Яа-яЁё]{4,}/g, (w) => {
     const fix = dictNearest(w);
     if (!fix) return w;
-    return w === w.toUpperCase() ? fix.toUpperCase() : fix;
+    const a = w.toLowerCase(), b = String(fix).toLowerCase();
+    if (a === b) return w;
+    // Словарь — не цензор. Две проверки отсекают «исправления», которые на
+    // самом деле калечат слово:
+    //  • обрезкa хвоста: «Пангию» → «Панг» (потеряно 2+ буквы в конце) — имя
+    //    собственное из манги, словарю его не знать;
+    //  • чужое слово с тем же началом: «СО-БИРАЛСЯ» → «СО-БОРОЛСЯ» (общий
+    //    префикс — одна буква, дальше другое слово).
+    if (b.length < a.length - 2) return w;
+    // Регистр исходника важнее словаря: «СЛАВАвв» — это «СЛАВА», а не «слава».
+    const caps = (w.match(/[А-ЯЁ]/g) || []).length;
+    const lower = (w.match(/[а-яё]/g) || []).length;
+    const shouty = caps > 0 && caps >= lower;
+    return shouty ? String(fix).toUpperCase() : fix;
   });
 }
 
@@ -605,8 +648,14 @@ function mergeSplitTokens(text) {
     // «ИЗ-ЗА» — настоящее слово С ДЕФИСОМ (частота 183), и разрывать его нельзя:
     // проверять надо само слово с дефисом, а не слипшуюся форму «изза».
     if (Words.rank.has(out[i].toLowerCase())) continue;
+    // Разрываем ТОЛЬКО когда слитная форма — известное слово («ПОДР-УШ» →
+    // «ПОДРУШ»). Если словарь слитной формы не знает, дефис настоящий, его
+    // поставил автор: «РИ-ОНИ», «ХА-А», «ЭЙ-ТЫ». Раньше разрезалось всё
+    // неизвестное, и в реплику уходило «РИ ОНИ» вместо «РИ-ОНИ» (06.11).
     const r = Words.rank.get((m[1] + m[2]).toLowerCase());
-    if (r !== undefined && r <= Words.KNOWN_RANK) continue;
+    const joinedKnown = r !== undefined && r <= Words.KNOWN_RANK;
+    const tailKnown = Words.rank.has(m[2].toLowerCase());
+    if (!joinedKnown && tailKnown) continue;    // «РИ-ОНИ», «ХА-А»
     out.splice(i, 1, m[1], m[2]);
   }
   for (let pass = 0; pass < 3; pass++) {
@@ -885,6 +934,53 @@ function dropLetterNameTail(text) {
   return tokens.join(' ');
 }
 
+/**
+ * Слово, разрезанное переносом БЕЗ дефиса, где первая половина кончается точкой
+ * («ПОДТВЕРД.» + «ДИЛИСЬ»): буква на стыке повторяется, движок читает её дважды
+ * и режет слово. Склеиваем по перекрытию — но только если получилось настоящее
+ * слово по словарю. Иначе оставляем как есть: точка могла быть и концом фразы.
+ */
+function glueOverlapWords(text) {
+  const src = String(text || '');
+  if (typeof Words === 'undefined' || !Words.ready) return src;
+  const parts = src.split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return src;
+  const out = [];
+  for (let i = 0; i < parts.length; i++) {
+    const a = parts[i];
+    const m = /^([А-Яа-яЁё]{4,})[.\-]$/u.exec(a);
+    const nb = i + 1 < parts.length ? /^([А-Яа-яЁё]+)([^А-Яа-яЁё]*)$/u.exec(parts[i + 1]) : null;
+    if (m && nb) {
+      const head = m[1], rest = nb[1], tail = nb[2];
+      let done = false;
+      // k = 0 — самый частый случай: чтец потерял букву на стыке и поставил
+      // точку вместо неё («ПОДТВЕР.» + «ДИЛИСЬ» → «ПОДТВЕРДИЛИСЬ»). k = 1–2 —
+      // когда буква прочитана дважды. Всё проверяется словарём: без готового
+      // слова склейки нет, поэтому точка в конце фразы ничего не съест.
+      for (let k = 0; k <= Math.min(2, rest.length - 2); k++) {
+        const cand = head + rest.slice(k);
+        if (Words.inDict(cand.toLowerCase()) || Words.isKnown(cand.toLowerCase())) {
+          out.push(cand + tail);
+          i++;
+          done = true;
+          break;
+        }
+      }
+      if (done) continue;
+    }
+    out.push(a);
+  }
+  return out.join(' ');
+}
+
+/** Строка — служебная плашка приложения, а не текст страницы. */
+function isAppToastText(text) {
+  const t = String(text || '');
+  return /(Полоса|Страница)\s*\d+\s*(распознана|обновлена|распознаётся)/i.test(t)
+      || /реплик\s*[·,]\s*всего\s*\d+/i.test(t)
+      || /\d+\s*реплик\s*·\s*\d+([.,]\d+)?\s*с/.test(t);
+}
+
 function polishLineText(raw) {
   let text = String(raw || '').replace(/\u00AD/g, '-').replace(/\s+/g, ' ').trim();
   if (!text) return '';
@@ -906,6 +1002,7 @@ function polishLineText(raw) {
   text = mergeSplitTokens(text);
   text = spliceFragmentRuns(text);
   text = glueBrokenHalves(text);
+  text = glueOverlapWords(text);
   text = glueSplitWords(text);
   text = fixConfusedShortWords(text);
   text = repairWordsByDict(text);
@@ -915,7 +1012,18 @@ function polishLineText(raw) {
   // Фразы чиним ПОСЛЕ слов: словарь уже успел испортить «СЛАВА» → «СЛАБА».
   text = fixPhrases(text);
   text = dropLetterNameTail(text);
-  return trimJunkEdges(text).trim();
+  const polished = trimJunkEdges(text).trim();
+  // Страховка от «умной» чистки: словарь чинит слова, но не выбрасывает смысл.
+  // На телефоне 06.11 «ХОТЬ Я И ОЖИДАЛА ЧЕГО-ТО ПОДОБНОГО…» превращалось в
+  // «ХОТЬ ОЖИДАЛА ЧЕ ГОТО ПОДОБНОГО…», а «Разве не он выбросил Пангию…» — в
+  // «…Панг». Правило простое: потеряли больше пятой части букв — оставляем
+  // исходную строку (сняв только лишние пробелы).
+  const letters = (t) => (String(t).match(/[А-Яа-яЁё]/g) || []).length;
+  const rawLetters = letters(raw);
+  if (rawLetters >= 6 && letters(polished) < rawLetters * 0.8) {
+    return String(raw).replace(/\s+/g, ' ').trim();
+  }
+  return polished;
 }
 
 /** Строка состоит ТОЛЬКО из символов-двойников: «OHO», «4YBC», «MHE TAK». */
@@ -1025,14 +1133,32 @@ function fixCaseInCaps(text) {
 }
 
 function cleanSpeech(raw) {
+  const dictHas = (w) => (typeof Words !== 'undefined' && Words && Words.rank && Words.rank.has(w));
   let text = String(raw || '')
-    .replace(/(?<=\p{L})\s*-\s*(?=\p{L})/gu, '')
+    // Дефис на переносе («СО-БИРАЛСЯ», «ВОЛ-НУЕТСЯ») склеиваем, а НАСТОЯЩИЙ
+    // дефис автора — нет: раньше «ЧЕГО-ТО» превращалось в «ЧЕГОТО», «ХА-А» и
+    // «РИ-ОНИ» теряли дефис и выпадали из реплики (телефон 06.11, 10:02).
+    // Признак честный, по словарю: если слитная форма словарная, а дефисная —
+    // нет, дефис был переносом.
+    .replace(/(\p{L}+)\s*-\s*(\p{L}+)/gu, (m, a, b) => {
+      const joined = (a + b).toLowerCase(), hyph = (a + '-' + b).toLowerCase();
+      return (dictHas(joined) && !dictHas(hyph)) ? a + b : a + '-' + b;
+    })
     .replace(/\s+/g, ' ')
     .trim();
   text = isLookalikeOnly(text) ? fixLookalikesForced(text) : fixLookalikes(text);
   text = fixCaseInCaps(text);
+  // Склейка разорванного слова из однобуквенных обрывков («ВЛ И ТЬ» →
+  // «ВЛИТЬ»). Но «Я», «И», «А», «В», «С», «У», «О», «К» — самостоятельные
+  // слова, и склеивать их нельзя: «ХОТЬ Я И ОЖИДАЛА» → «ХОТЬ ЯИОЖИДАЛА», после
+  // чего «Я И» выпадали из реплики (телефон 06.11, 10:02).
+  const soloWords = /^[ЯИАВСУОК]$/i;
   for (let k = 0; k < 3; k++) {
-    text = text.replace(/(?<!\p{L})\p{L}(\s+\p{L}){1,4}(?!\p{L})/gu, m => m.replace(/\s+/g, ''));
+    text = text.replace(/(?<!\p{L})\p{L}(\s+\p{L}){1,4}(?!\p{L})/gu, m => {
+      const letters = m.split(/\s+/);
+      if (letters.every(ch => soloWords.test(ch))) return m;
+      return m.replace(/\s+/g, '');
+    });
   }
   // Перенос по слогам без дефиса: «ВЛ ИТЬ» → «ВЛИТЬ», «ВОЛ НУ ЕТСЯ» → «ВОЛНУЕТСЯ».
   // Делается ПОСЛЕ склейки однобуквенных обрывков: там правило совсем узкое
@@ -1695,6 +1821,10 @@ const Words = {
     let t = joinHyphens(String(text || ''));
     // Дефис, прочитанный как точка: «ЕЁ ВЕ. ЛИЧЕСТВО» → «ЕЁ ВЕЛИЧЕСТВО».
     t = joinShortDot(this, t);
+    // Слово, разрезанное переносом БЕЗ дефиса, склеиваем ДО словарной правки:
+    // иначе «ПОДТВЕРД. ДИЛИСЬ» чинится по частям и в реплику уходит
+    // «ПОДТВЕРД. ДЕЛИСЬ» (телефон 06.11, 10:02).
+    if (this.ready) t = glueOverlapWords(t);
     // Латиница, которая на самом деле кириллица, и латинский шум — ДО разбивки
     // слипшихся слов: иначе «СЛУШАЙТЕЕУ.owb» сначала делится на «слуша» +
     // «йтЕЕУ.owb» (10 кириллических букв) и латинский хвост уже не отделить.
@@ -1806,6 +1936,15 @@ const Words = {
     if (before >= 3 && after < before * 0.6) {
       const kept = this.finish(raw, true);
       if (kept) fixed = kept;
+    }
+    // Второй счёт — по БУКВАМ: слипшиеся слова чистка выкидывает целиком, а
+    // число «слов» при этом не меняется («у негобылоникакойпривя занностик
+    // своим детям» → «у занностик своим детям»). Потеря букв видна сразу.
+    const cnt = (t) => (String(t).match(/[А-Яа-яЁё]/g) || []).length;
+    const rawCnt = cnt(raw), fixCnt = cnt(fixed);
+    if (rawCnt >= 10 && fixCnt < rawCnt * 0.8) {
+      const kept = this.finish(raw, true);
+      if (kept && cnt(kept) > fixCnt) fixed = kept;
     }
     if (knownLong.length >= 1) return fixed;                     // есть настоящие слова
 
@@ -3815,8 +3954,9 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     const items = [];
     for (let li = 0; li < lines.length; li++) {
       const ln = lines[li];
-      if (onProgress && det.boxes.length)
-        onProgress(done + (li + 1) / (lines.length + 1), det.boxes.length);
+      // Только целые: раньше сюда уходила дробь (done + 1.5/3), и в строке
+      // прогресса появлялось «0.13333333» на три секунды (телефон 06.11, 10:01).
+      if (onProgress && det.boxes.length) onProgress(done + 1, det.boxes.length);
       await yieldUI();
       const wide = (ln.right - ln.left) / W >= 0.25;   // реплика, а не звук
       // Край полосы: строка могла быть разрезана границей экрана. Поля вокруг
@@ -3910,6 +4050,15 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     // Текст не теряем: принимаем второй проход, только если он сохранил хотя
     // бы 80 % букв (иначе из титула пропадали строки).
     if (!alt.items.length || lettersOf(alt.items.map(i => i.text)) < letters * 0.8) continue;
+    // Обрезок на широком блоке — это не «более точное чтение», а потеря:
+    // «Разве не он выбросил таким образом Пангию…» подменялось словом «разве»,
+    // а абзац из четырёх строк — фразой «Если так подумать, у своим детям.»
+    // (телефон 06.11, 10:02). Если первый проход дал три слова и больше, второй
+    // обязан оставить хотя бы столько же слов и 90 % букв.
+    const wordsOf = (arr) => arr.join(' ').split(/\s+/).filter(w => (w.match(/\p{L}/gu) || []).length >= 2).length;
+    const altWords = wordsOf(alt.items.map(i => i.text));
+    const firstWords = wordsOf(firstTexts);
+    if (firstWords >= 3 && (altWords < firstWords || lettersOf(alt.items.map(i => i.text)) < letters * 0.9)) continue;
     // Если второй проход набрал заметно больше букв, это почти всегда дубль
     // («… будучи старшей жизнь, Оцачит старшей сестрой тирана»), а не более
     // точное чтение: такую замену не берём.
@@ -4464,7 +4613,12 @@ function bubblesOf(group, rtl, R) {
         const last = text[text.length - 1];
         if (last === '-' || last === '\u00AD') text = text.slice(0, -1);
         else if (joinBrokenWord(text, t)) text = text.replace(/[.\-]$/, '');   // «БУДЕ.» + «ТЕ» → «БУДЕТЕ»
-        else if (!(t.length <= 2 && /\p{L}$/u.test(prev) && /^\p{L}/u.test(t))) text += ' ';
+        // Одиночная буква-слово («Я», «И», «А», «В») — это НЕ обрывок слова:
+        // приклеивать к ней следующую часть нельзя, иначе «ХОТЬ Я И ОЖИДАЛА»
+        // превращается в «ХОТЬ ЯИОЖИДАЛА» и слова выпадают из реплики
+        // (телефон 06.11, 10:02 — читалось «ХОТЬ ОЖИДАЛА ЧЕГО-ТО…»).
+        else if (!(t.length <= 2 && /\p{L}$/u.test(prev) && !/^[ЯИАВСУОК]$/iu.test(prev)
+                   && /^\p{L}/u.test(t))) text += ' ';
       }
       text += t;
     });
