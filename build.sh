@@ -68,11 +68,14 @@ cp koma-lite.html apk/app/src/main/assets/koma-web.html
 # выбирать файлы руками: страница сама находит папку models/ (см. loadBundledModels).
 mkdir -p pwa/models pwa/icons
 cp koma-web.html pwa/index.html
+# version.json — по нему приложение понимает, что на сервере уже другая сборка
+printf '{"v":"%s","at":"%s"}\n' "$VER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > pwa/version.json
+cat pwa/version.json
 cp apk/app/src/main/assets/models/det.onnx        pwa/models/det.onnx
 cp apk/app/src/main/assets/models/rec.onnx        pwa/models/rec.onnx
 cp apk/app/src/main/assets/models/charset.txt     pwa/models/charset.txt
 cp apk/app/src/main/assets/models/best_finetuned_r4.onnx pwa/models/rec2.onnx
-for f in pwa/index.html pwa/manifest.webmanifest pwa/sw.js pwa/models/det.onnx pwa/models/rec.onnx pwa/models/charset.txt pwa/models/rec2.onnx; do
+for f in pwa/index.html pwa/version.json pwa/manifest.webmanifest pwa/sw.js pwa/models/det.onnx pwa/models/rec.onnx pwa/models/charset.txt pwa/models/rec2.onnx; do
   [ -s "$f" ] || { echo "PWA: нет $f"; exit 1; }
 done
 PZ=$(du -sm pwa | cut -f1)

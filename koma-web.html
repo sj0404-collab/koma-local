@@ -2875,7 +2875,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.89';
+const VERSION = 'v1.9.90';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -14168,6 +14168,54 @@ async function selfCheck() {
   sc.style.color = bad ? '#ffb4b4' : 'var(--dim)';
 }
 
+/**
+ * ПРОВЕРКА ОБНОВЛЕНИЯ.
+ *
+ * На телефоне 06.11 (13:00) человек обновил страницу, а баги остались: service
+ * worker отдавал старую оболочку из кеша, и приложение продолжало работать
+ * прошлой сборкой. Снаружи это выглядит как «правки не доехали».
+ *
+ * Поэтому приложение само сверяет свою версию с version.json на сервере
+ * (в PWA его кладёт build.sh). Если версия другая — чистим кеши, снимаем
+ * service worker и один раз перезагружаемся. Один раз — по отметке в
+ * sessionStorage, чтобы не попасть в петлю перезагрузок.
+ */
+async function checkAppUpdate() {
+  if (!/^https?:$/.test(location.protocol)) return false;   // файл с диска — проверять нечего
+  let real = '';
+  try {
+    const r = await fetch('./version.json?t=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return false;
+    const j = await r.json();
+    real = String((j && j.v) || '');
+  } catch (e) { return false; }
+  if (!real || real === VERSION) return false;
+  const key = 'koma.upd.' + real;
+  let tried = false;
+  try { tried = sessionStorage.getItem(key) === '1'; } catch (e) { /* нет storage */ }
+  toast('Вышла новая версия ' + real + ' — обновляю…', 5000);
+  console.warn('обновление: сервер ' + real + ', приложение ' + VERSION);
+  if (tried) return true;                       // уже пытались — не зацикливаемся
+  try { sessionStorage.setItem(key, '1'); } catch (e) { /* не критично */ }
+  await new Promise(r => setTimeout(r, 1200));
+  try {
+    if (window.caches) {
+      const ks = await caches.keys();
+      await Promise.all(ks.map(k => caches.delete(k)));
+    }
+  } catch (e) { console.warn('обновление: кеш не почистился', e); }
+  try {
+    if (navigator.serviceWorker) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister()));
+      if (navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage('koma:drop');
+    }
+  } catch (e) { console.warn('обновление: service worker не снялся', e); }
+  location.replace(location.pathname + '?v=' + Date.now());
+  return true;
+}
+try { if (typeof window !== 'undefined') window.checkAppUpdate = checkAppUpdate; } catch (e) {}
+
 (async function boot() {
   // Каждый шаг запуска отдельно. 28.10 на телефоне первый же вызов голоса
   // (`speechSynthesis` в WebView не существует) обрывал весь boot: не грузились
@@ -14182,6 +14230,15 @@ async function selfCheck() {
   // разблокировку — на первом касании экрана. Просьба 06.11, 12:22: «до
   // открытия книги уже держи tts включённым, чтобы задержка была поменьше».
   try { if (typeof TTS !== 'undefined' && TTS.prewarm) TTS.prewarm(); } catch (e) { /* не критично */ }
+  // Сверка версии с сервером: чтобы «обновил страницу, а баги те же» больше не
+  // случалось (старая сборка из кеша service worker).
+  try {
+    setTimeout(() => { checkAppUpdate().catch(() => {}); }, 4000);
+    setInterval(() => { checkAppUpdate().catch(() => {}); }, 300000);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') checkAppUpdate().catch(() => {});
+    });
+  } catch (e) { /* не критично */ }
   // Надпись «Скрипты страницы не выполнились» — аварийная, для случая, когда не
   // выполнился НИ ОДИН скрипт. Как только boot начался, она врёт: меняем на
   // «Загрузка», а итог пишет selfCheck в конце.
