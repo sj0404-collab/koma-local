@@ -577,6 +577,14 @@ const Reader = {
     if (!(this.bandCache instanceof Map)) this.bandCache = new Map();
     const bandMap = this.bandCache.get(i) || new Map();
 
+    // Эта же область только что распознавалась — второй раз не гоняем.
+    // Обход только у ручного повтора («Распознать заново»): у него force без
+    // internal. Фоновые и служебные проходы правило соблюдают.
+    if (this.scanCooldown(i, band) && !(force && !opts.internal)) {
+      this.paintPage(i);
+      return this.regions.get(i) || null;
+    }
+
     // Кэш годится, если: (а) полоса уже распознана; (б) страницу распознали
     // целиком; (в) данные пришли из буфера прошлой сессии — тогда считаем их
     // полной страницей, иначе старые книги распознавались бы заново.
@@ -993,20 +1001,67 @@ const Reader = {
     return { y0, y1, vy0: y0, vy1: y1,
       key: 'b' + (b.index || 0) + ':' + Math.round(y0 / 96) + '-' + Math.round(y1 / 96) };
   },
-  /** Уже распознана ли эта полоса (в кэше полос или страница целиком). */
-  bandScanned(i, b) {
+  /**
+   * Покрыта ли полоса (в пикселях кадра) уже распознанными кусками.
+   *
+   * Раньше здесь было «один кусок перекрывает 60 % полосы». Этого мало:
+   * границы полосы прилипают к пустым местам и при каждой прокрутке чуть
+   * съезжают, поэтому кэш набирал несколько кусков, каждый по половине полосы,
+   * и полоса считалась НЕраспознанной — приложение снова и снова запускало
+   * распознавание (телефон 06.11, 12:02: «Полоса 2 обновлена: 0 реплик»
+   * каждые две секунды). Теперь считаем ОБЪЕДИНЕНИЕ кусков.
+   */
+  bandCoveredPx(i, px) {
     const data = this.regions.get(i);
     const maps = this.bandCache && this.bandCache.get(i);
     if (data && !maps) return true;                 // страница распознана целиком
     if (!maps) return false;
-    const px = this.bandPx(i, b);
     if (!px) return !!data;
     const h = Math.max(1, px.y1 - px.y0);
+    const segs = [];
     for (const [, part] of maps) {
       const r = part && part.res && part.res.band;
       if (!r) return true;                          // этот кусок — вся страница
-      if (Math.min(r.y1, px.y1) - Math.max(r.y0, px.y0) > h * 0.6) return true;
+      const a = Math.max(r.y0, px.y0), b = Math.min(r.y1, px.y1);
+      if (b > a) segs.push([a, b]);
     }
+    segs.sort((a, b) => a[0] - b[0]);
+    let covered = 0, end = -Infinity;
+    for (const [a, b] of segs) {
+      const from = Math.max(a, end);
+      if (b > from) covered += b - from;
+      if (b > end) end = b;
+    }
+    return covered > h * 0.6;
+  },
+  /** Уже распознана ли эта полоса (в кэше полос или страница целиком). */
+  bandScanned(i, b) {
+    const maps = this.bandCache && this.bandCache.get(i);
+    const px = this.bandPx(i, b);
+    return this.bandCoveredPx(i, px);
+  },
+
+  /**
+   * Не гонять одну и ту же область по кругу.
+   *
+   * Полоса, где нет речи (облачко с одними точками «…» — это размышление,
+   * слов там нет), распознавалась заново каждые две секунды: геометрия полосы
+   * после перерисовки чуть менялась, ключ кэша не совпадал, и цикл не
+   * заканчивался никогда. Тост «0 реплик» висел на экране бесконечно
+   * (телефон 06.11, 12:02).
+   *
+   * Правило: ту же страницу и ту же полосу (с допуском) не распознаём повторно
+   * в течение SCAN_COOLDOWN_MS. Ручное «Распознать заново» это правило обходит.
+   */
+  scanCooldown(i, band) {
+    const now = Date.now();
+    if (!(this._scanLog instanceof Map)) this._scanLog = new Map();
+    const k = i + ':' + (band
+      ? Math.round(band.y0 / 64) + '-' + Math.round(band.y1 / 64)
+      : 'page');
+    const prev = this._scanLog.get(k);
+    this._scanLog.set(k, now);
+    if (prev && now - prev < SCAN_COOLDOWN_MS) return true;
     return false;
   },
   /**
@@ -1145,6 +1200,11 @@ const Reader = {
  * успеть рассмотреть кадр: иначе читалка «перелетает полсюжета» (жалоба 4.11).
  */
 const PANEL_DWELL_MS = 520;
+/**
+ * Пауза, в течение которой ту же полосу повторно не распознаём. Две секунды
+ * детектора на цикл — это и был бесконечный «0 реплик» на телефоне 06.11.
+ */
+const SCAN_COOLDOWN_MS = 12000;
 
 /* ───────────────────────── 9. Буфер строк ───────────────────────── */
 const Buffer = {
@@ -3026,6 +3086,38 @@ function mergeBandLines(parts, canvas) {
         if (q2 > q1) out[same] = ln;
         continue;
       }
+      // Тот же пузырь, прочитанный ДВАЖДЫ и по-разному: одна полоса поймала
+      // его целиком, другая — обрезанным краем экрана, и в реплике звучало
+      // «Мы ПросТО ВыПол МЫ ПРОСТО ВЫПИЛ НИЛИ СВОЮ РАБОТУ» (проверка 06.11 на
+      // странице с двумя облачками). Тексты не совпадают дословно, поэтому
+      // прежние проверки их не ловили. Правило: если буквы одной реплики
+      // почти целиком (80 %) входят в другую В ТОМ ЖЕ ПОРЯДКЕ и рамки стоят
+      // друг на друге — это один пузырь, оставляем длинное чтение.
+      const lettersOfText = (t) => String(t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+      const subRatio = (a, b) => {
+        if (!a || !b) return 0;
+        let i = 0;
+        for (let j = 0; j < b.length && i < a.length; j++) if (a[i] === b[j]) i++;
+        return i / a.length;
+      };
+      const partial = out.findIndex(o => {
+        const oh = Math.max(1e-6, o.bottom - o.top);
+        const ow = Math.max(1e-6, o.right - o.left);
+        const w = Math.max(1e-6, ln.right - ln.left);
+        if (overlapHdup(o, ln) <= Math.min(ow, w) * 0.4) return false;
+        if (overlapV(o, ln) <= Math.min(h, oh) * 0.4) return false;
+        const a = lettersOfText(ln.text), b = lettersOfText(o.text);
+        const la = a.length, lb = b.length;
+        if (la < 4 || lb < 4) return false;
+        if (Math.max(la, lb) < Math.min(la, lb) * 1.25) return false;   // длины похожи — это разные реплики
+        const short = la < lb ? a : b, long = la < lb ? b : a;
+        return subRatio(short, long) > 0.8;
+      });
+      if (partial >= 0) {
+        const cur = out[partial];
+        if (lettersOfText(ln.text).length > lettersOfText(cur.text).length) out[partial] = ln;
+        continue;
+      }
       out.push(ln);
     }
   }
@@ -3084,11 +3176,11 @@ async function onScrollSettled() {
   // длиннее экрана, полосы идут по мере прокрутки).
   if (OCR.ready && !State.scanning && RULES.autoScan) {
     const band = Reader.visibleBandPx(i);
-    const key = band ? band.key : 'page';
-    const bandMap = Reader.bandCache.get(i);
-    const done = bandMap && bandMap.has(key);
-    const hasPage = Reader.regions.get(i) && !band;
-    if (!done && !hasPage) await Reader.scanPage(i, {});
+    // «Уже распознана» — по покрытию области, а не по совпадению строкового
+    // ключа: границы полосы прилипают к пустому месту и при каждом сдвиге
+    // дают новый ключ, из-за чего один и тот же кадр распознавался по кругу.
+    const done = Reader.bandCoveredPx(i, band);
+    if (!done) await Reader.scanPage(i, {});
   }
   if (RULES.semiManual && State.semi) {
     if (State.waitingScroll) {

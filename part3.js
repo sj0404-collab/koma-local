@@ -1066,7 +1066,12 @@ function isAppToastText(text) {
       || /\d+\s*реплик\s*·\s*\d+([.,]\d+)?\s*с/.test(t)
       // Обрывки той же плашки, если она попала в кадр по частям.
       || /^\s*[\d.,]+\s*с,\s*(распознавание|детектор)/i.test(t)
-      || /^\s*с,\s*\d+\s*строк/i.test(t);
+      || /^\s*с,\s*\d+\s*строк/i.test(t)
+      // Обрывки плашки, которые прошли как отдельные «реплики»: «странице 2.2 с»
+      // и «строк)» (проверка 06.11 на кадре с самой плашкой в нём).
+      || /^\s*строк\s*\)?\s*$/i.test(t)
+      || /страниц[еы]\s*[·,]?\s*[\d.,]+\s*с/i.test(t)
+      || /^[\d.,]+\s*с\s*\(/i.test(t);
 }
 
 function polishLineText(raw) {
@@ -2456,6 +2461,46 @@ function canvasFromImage(img) {
   c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0);
   return c;
 }
+/**
+ * Средняя яркость по готовым пикселям (каждый 4-й пиксель — дешево).
+ * Нужна, чтобы понять полярность кропа: обычная страница — тёмные буквы на
+ * светлом, но надпись поверх рисунка бывает наоборот.
+ */
+function meanLumaOf(data) {
+  let sum = 0, n = 0;
+  for (let i = 0; i + 2 < data.length; i += 16) {
+    sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    n++;
+  }
+  return n ? sum / n : 255;
+}
+/** Инверсия пикселей на месте (негатив). */
+function invertPixels(data) {
+  for (let i = 0; i + 2 < data.length; i += 4) {
+    data[i] = 255 - data[i];
+    data[i + 1] = 255 - data[i + 1];
+    data[i + 2] = 255 - data[i + 2];
+  }
+  return data;
+}
+/**
+ * Тёмный кроп? Белый текст на тёмном рисунке — не редкость в вебтунах, а весь
+ * конвейер (чернила, обрезка краёв, чтец) обучен на тёмном по светлому.
+ * На телефоне 06.11, 12:03 кадр с белыми буквами на чёрном дал «8 строк» и
+ * НОЛЬ текста за 0,1 с — модель просто видела негатив.
+ */
+function isDarkCanvas(cv) {
+  if (!cv || cv.width < 8 || cv.height < 8) return false;
+  try {
+    const tw = Math.min(cv.width, 32);
+    const th = Math.max(2, Math.min(cv.height, Math.round(cv.height * tw / cv.width) || 2));
+    const t = makeCanvas(tw, th);
+    const g = t.getContext('2d', { willReadFrequently: true });
+    g.drawImage(cv, 0, 0, tw, th);
+    return meanLumaOf(g.getImageData(0, 0, tw, th).data) < 118;
+  } catch (e) { return false; }
+}
+
 function lumaFrom(data, w, h) {
   const out = new Uint8Array(w * h);
   for (let i = 0, p = 0; i < out.length; i++, p += 4) {
@@ -2626,7 +2671,10 @@ function textLines(imgCanvas, box, R) {
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(imgCanvas, left, top, right - left, bottom - top, 0, 0, w, h);
-  const data = ctx.getImageData(0, 0, w, h).data;
+  let data = ctx.getImageData(0, 0, w, h).data;
+  // Негатив (белые буквы на тёмном фоне): иначе «чернилами» считается сам фон,
+  // и строки слипаются в один кроп. Инверсия на месте — без лишнего canvas.
+  if (meanLumaOf(data) < 118) data = invertPixels(data);
   const luma = lumaFrom(data, w, h);
   const globalThr = inkThreshold(luma, R);
   if (globalThr < 0) return [];
@@ -3953,9 +4001,12 @@ async function recognizePage(imgCanvas, R, onProgress, band, preDet) {
     c.getContext('2d', { willReadFrequently: true })
       .drawImage(canvas, ln.left, ln.top, w, h, 0, 0, w, h);
     crops++;
+    // Негатив: белый текст на тёмном рисунке приводим к «тёмное по светлому»,
+    // иначе чтец возвращает пустоту за 0,1 с (телефон 06.11, 12:03).
+    const base = isDarkCanvas(c) ? invertCanvas(c) : c;
     // Перед распознаванием убираем из кропа обрезки соседних строк (см.
     // trimCropToInk): без этого модель читала два текста сразу.
-    const trimmed = sR.trimCrop === false ? c : trimCropToInk(c);
+    const trimmed = sR.trimCrop === false ? base : trimCropToInk(base);
     const ckey = _cropKey(trimmed, wide, R);
     const hit = textCacheGet(ckey);
     if (hit) return hit;
