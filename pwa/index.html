@@ -2875,7 +2875,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.90';
+const VERSION = 'v1.9.91';
 
 /* ───────────────────────── 1. Хранилище (IndexedDB) ─────────────────────────
    Всё локально: книги — блобы страниц, модели — ArrayBuffer, правила — JSON.
@@ -11712,6 +11712,7 @@ const TTS = {
   },
   stop() {
     this.stopped = true; this.speaking = false; this.queue = [];
+    this._gen = (this._gen || 0) + 1;          // колбэки прошлой фразы — в мусор
     try { SpeakCursor.stop(); } catch (e) { /* ленты ещё нет */ }
     VOICE.cancel();
     Reader.current = null;
@@ -11839,6 +11840,17 @@ const TTS = {
     return avail.find(v => v.voiceURI === cur.voiceURI || v.name === cur.name) || null;
   },
   speakLine(line, then) {
+    // ── ПОКОЛЕНИЕ РЕЧИ ────────────────────────────────────────────────────
+    // Телефон 06.11, 13:0x: «голос был на первой реплике, а на остальных просто
+    // страница окончена». Причина — колбэки ПРОШЛОЙ фразы продолжали управлять
+    // очередью. Когда звучит первая реплика и подъезжает распознанная полоса,
+    // читалка запускает следующую фразу и отменяет текущую; отмена приходит
+    // как error 'interrupted', а обработчик ошибки вызывал then() — то есть
+    // «идём дальше». Каждая следующая фраза отменяла предыдущую и тут же сама
+    // получала свою отмену: очередь проскакивала целиком за доли секунды, и
+    // выходило «Страница дочитана» без звука. Теперь у каждой фразы свой номер:
+    // колбэк устаревшей фразы ничего не делает.
+    const gen = (this._gen = (this._gen || 0) + 1);
     // «Прочитано» отмечаем ТОЛЬКО когда голос реально заговорил (нажатие ▶ не
     // считается). Раньше отметка ставилась сразу: если синтез отказывал (нет
     // голоса, not-allowed), строка считалась прочитанной и при продолжении
@@ -11892,12 +11904,12 @@ const TTS = {
     // cancel() «на всякий случай» убивает очередь: следующий вызов уже не
     // запускается. Отменяем только если что-то реально звучит (в браузере) —
     // нативный движок отменять перед каждой репликой не нужно и вредно.
-    if (!VOICE.native()) {
-      const sw = VOICE.synth();
-      try {
-        if (sw && (sw.speaking || sw.pending)) VOICE.cancel();
-      } catch (e) { /* ignore */ }
-    }
+    // Раньше здесь стоял cancel() «на всякий случай» перед КАЖДОЙ фразой.
+    // На телефоне 06.11 (13:0x) это и съедало чтение: движок ещё считал
+    // предыдущую фразу звучащей, cancel() убивал только что запущенную, та
+    // приходила как 'interrupted', обработчик шёл дальше — и вся страница
+    // «дочитывалась» без звука. Отменять нужно только по команде (стоп,
+    // ⏭, повтор, новое ▶), и это уже делается в stop()/next/replay.
     Reader.current = line;
     Reader.currentPage = Reader.page;      // подсветка не ищет совпадения по тексту
     Reader.paintAllFrames();
@@ -11913,6 +11925,8 @@ const TTS = {
       try { SpeakCursor.start(line.text, this.rate); } catch (e) { /* не критично */ }
     };
     const finished = () => {
+      if (gen !== this._gen) return;              // это фраза прошлого поколения
+      this._retryCount = 0;
       clearTimeout(this._watch);
       try { SpeakCursor.stop(); } catch (e) {}
       // Движок может «проглотить» фразу: прислать start и сразу end. На телефоне
@@ -11946,15 +11960,30 @@ const TTS = {
       if (then) then();
     };
     const failed = (code) => {
+      if (gen !== this._gen) return;              // отменили МЫ — не идём дальше
       this.speaking = false;
       try { SpeakCursor.stop(); } catch (err) {}
       // Не заговорил — отметки быть не должно (ставится только в finished).
       if (marked) { try { Reader.unmarkSpoken(Reader.page, line); } catch (err) {} marked = false; }
       // Молчать нельзя: раньше «голос не работает» выглядело как поломка
       // читалки, хотя движок просто отбил озвучку.
-      if (code === 'not-allowed') toast('Браузер не разрешил озвучку — нажмите ▶ ещё раз', 5000);
-      else if (code === 'interrupted' || code === 'canceled') { /* это наш cancel() */ }
-      else toast('Голос не сказал: ' + code, 5000);
+      if (code === 'interrupted' || code === 'canceled') {
+        // Движок отбил фразу (наш cancel, переключение, занятость канала).
+        // Идти дальше нельзя: реплика пропала бы без звука. Повторяем ИМЕННО
+        // ЕЁ один раз, и только если за это время не начали другую.
+        const n = (this._retryCount || 0) + 1;
+        this._retryCount = n;
+        if (n <= 1 && !this.stopped) {
+          setTimeout(() => { if (!this.stopped && gen === this._gen) this.speakLine(line, then); }, 220);
+          return;
+        }
+        this._retryCount = 0;
+        toast('Голос оборвал реплику — пропускаю: «' + String(line.text || '').slice(0, 28) + '…»', 5000);
+      } else if (code === 'not-allowed') {
+        toast('Браузер не разрешил озвучку — нажмите ▶ ещё раз', 5000);
+      } else {
+        toast('Голос не сказал: ' + code, 5000);
+      }
       if (then) then();
     };
     const accepted = VOICE.speak(line.text, {
@@ -12184,8 +12213,19 @@ const TTS = {
     // отмечена прочитанной, поэтому повторно не читается).
     if (!this.stopped) {
       const rest = Reader.unspokenInBand();
-      if (rest.length) this.readQueue(rest);
-      else if (!first) this.readVisible();
+      if (rest.length) {
+        // Первая реплика может ещё звучать. Перезапускать очередь в этот
+        // момент нельзя: новой фразе приходилось отменять текущую, и (до
+        // правки выше) отмена уводила чтение дальше по списку — облачка
+        // «проглатывались». Поэтому ДОПИСЫВАЕМ остаток в очередь, а не
+        // начинаем её заново.
+        const have = new Set((this.queue || []).map(l => String(l.text || '')));
+        const add = rest.filter(l => !have.has(String(l.text || '')));
+        if (add.length) {
+          if (this.speaking || this.stopped === false) this.queue.push(...add);
+          else this.readQueue(add);
+        }
+      } else if (!first) this.readVisible();
     }
   },
   step() {
