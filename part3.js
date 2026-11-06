@@ -973,12 +973,93 @@ function glueOverlapWords(text) {
   return out.join(' ');
 }
 
+/**
+ * Страховка «ни одна строка не потерялась».
+ *
+ * Требование человека: реплик ровно столько, сколько видно, но и НИ ОДНА
+ * прочитанная строка не должна пропасть. На телефоне 06.11, 10:33 в облачке
+ * «ПОНЯТНО. / ЕЩЕ РАЗ БОЛЬ- / ШОЕ СПАСИБО.» в реплику ушло только
+ * «ЕЩЕ РАЗ БОЛЬШОЕ СПАСИБО» — первая строка потерялась по дороге между
+ * сборкой реплик и словарной чисткой.
+ *
+ * Правило: если строка распознана, но её букв нет в тексте ни одной реплики —
+ * приклеиваем её к ближайшей реплике (сверху или снизу), а если рядом ничего
+ * нет — оставляем отдельной репликой на своём месте по высоте.
+ */
+function attachLostLines(replicas, rawRegions, medH) {
+  const list = Array.isArray(replicas) ? replicas.slice() : [];
+  const raw = Array.isArray(rawRegions) ? rawRegions : [];
+  if (!raw.length || !list.length) return list;
+  const key = (t) => String(t || '').toUpperCase().replace(/[^А-ЯЁA-Z]/g, '');
+  const joined = key(list.map(l => l.text).join(' '));
+  // «Строка уже есть в реплике» — по СЛОВАМ, а не по целой строке: чистка и
+  // склейка меняют написание («СО-» + «БИРАЛСЯ» → «СОБИРАЛСЯ», «ПОДТВЕРД.» +
+  // «ДИЛИСЬ» → «ПОДТВЕРДИЛИСЬ»), и проверка целой строкой считала такую строку
+  // потерянной — тогда в реплику уезжал дубль («… УБИТЬ РИЧИ И ЛАРУ.. ОЧИ И
+  // ЛАРУ..»). Слово считается найденным, если оно входит в текст реплики как
+  // подстрока (или совпадают первые 4 буквы).
+  const present = (k, text) => {
+    if (joined.includes(k)) return true;
+    const words = String(text || '').toUpperCase().replace(/Ё/g, 'Е')
+      .split(/[^А-ЯA-Z]+/).filter(w => w.length >= 3);
+    if (!words.length) return false;
+    let hit = 0;
+    for (const w of words) {
+      const w4 = w.slice(0, 4);
+      if (joined.includes(w) || (w.length >= 5 && joined.includes(w4))) hit++;
+    }
+    return hit / words.length >= 0.6;
+  };
+  const lost = [];
+  for (const r of raw) {
+    const t = String(r.text || '').trim();
+    const k = key(t);
+    if (k.length < 2 || present(k, t)) continue;
+    if (isAppToastText(t)) continue;
+    // Титул, «Tr. 48», адрес сайта и мусорные обрывки репликами не считаются —
+    // страховка не имеет права вернуть их в список (иначе «Каk прожить» и
+    // «Tr. 48» снова попадали в чтение).
+    if (looksLikeJunkLine(t)) continue;
+    if (isTitleOrMarker(t, r, 1, medH || 0)) continue;
+    lost.push(r);
+  }
+  if (!lost.length) return list;
+  const mid = (o) => ((Number(o.top) || 0) + (Number(o.bottom) || 0)) / 2;
+  let attached = 0;
+  for (const r of lost) {
+    const t = String(r.text || '').trim();
+    let best = null, bestD = Infinity;
+    for (const l of list) {
+      const d = Math.abs(mid(l) - mid(r));
+      if (d < bestD) { bestD = d; best = l; }
+    }
+    if (best && bestD <= 0.05) {
+      best.text = mid(r) < mid(best) ? (t + ' ' + best.text) : (best.text + ' ' + t);
+      best.top = Math.min(Number(best.top) || 0, Number(r.top) || 0);
+      best.bottom = Math.max(Number(best.bottom) || 0, Number(r.bottom) || 0);
+      attached++;
+    } else {
+      list.push({ ...r, text: t, attachedLost: true });
+    }
+  }
+  list.sort((a, b) => (Number(a.top) || 0) - (Number(b.top) || 0));
+  try { if (typeof OCR !== 'undefined') OCR.attachedLost = attached; } catch (e) { /* не важно */ }
+  return list;
+}
+
 /** Строка — служебная плашка приложения, а не текст страницы. */
 function isAppToastText(text) {
   const t = String(text || '');
   return /(Полоса|Страница)\s*\d+\s*(распознана|обновлена|распознаётся)/i.test(t)
+      // \b с кириллицей не работает: в JS \w — только латиница, поэтому
+      // граница слова после «реплик» не находилась и плашка проходила.
+      || /^\s*реплик(?![А-Яа-яЁё])/i.test(t)
       || /реплик\s*[·,]\s*всего\s*\d+/i.test(t)
-      || /\d+\s*реплик\s*·\s*\d+([.,]\d+)?\s*с/.test(t);
+      || /(детектор|распознавание)\s*[\d.,]+\s*с/i.test(t)
+      || /\d+\s*реплик\s*·\s*\d+([.,]\d+)?\s*с/.test(t)
+      // Обрывки той же плашки, если она попала в кадр по частям.
+      || /^\s*[\d.,]+\s*с,\s*(распознавание|детектор)/i.test(t)
+      || /^\s*с,\s*\d+\s*строк/i.test(t);
 }
 
 function polishLineText(raw) {

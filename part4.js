@@ -79,8 +79,14 @@ const Reader = {
     this.syncSub();
     await this.buildStrip();
     this.scrollToPage(this.page, false);
-    // Ничего не запускаем сами: сначала человек видит, что происходит.
-    if (!this.regions.get(this.page)) this.showStart(); else this.hideStart();
+    // Распознавание стартует СРАЗУ при открытии главы (просьба 06.11, 10:33:
+    // «сделай распознавание сразу при открытии, чтобы он успел распознать»).
+    // Раньше здесь показывалась заглушка и ждали нажатия — первые секунды
+    // пропадали, а потом человек видел «Распознаём…» уже после листания.
+    if (!this.regions.get(this.page)) {
+      this.hideStart();
+      if (RULES.autoScan && OCR.ready) setTimeout(() => { this.scanCurrent(false); }, 0);
+    } else this.hideStart();
   },
 
   syncSub() {
@@ -249,7 +255,10 @@ const Reader = {
     // Само ничего не запускаем: человек сам сказал «Распознать» (или включил
     // автозапуск в настройках). Иначе при открытии страницы начиналось
     // распознавание, и было непонятно, что вообще происходит.
-    if (!this.scrollBusy && (!data || staleFull)) {
+    // Ждать «лента встала» нужно только когда текст у страницы УЖЕ есть и его
+    // надо уточнить. Если текста нет вовсе — распознаём сразу, иначе на телефоне
+    // первые секунды после листания уходили в пустоту (06.11, 10:33).
+    if ((!this.scrollBusy || !data) && (!data || staleFull)) {
       if (RULES.autoScan) { this.hideStart(); this.scanCurrent(false); }
       else this.showStart();
     }
@@ -574,6 +583,12 @@ const Reader = {
             : `Распознаю ${label} заново…` + (phase ? ' ' + phase : '');
         }
       }, band, opts.det || null);
+      // Своя плашка «Полоса N распознана…» может попасть в кадр (снимок экрана).
+      // До сборки реплик её строки отбрасываем: иначе они склеиваются в
+      // «реплику» вида «реплик · 6.1 с (детектор 2.5 с, распознавание 3.6 с,
+      // 4 строк)» и уходят в чтение (телефон 06.11, 10:33).
+      const toastLines = (res.regions || []).filter(r => isAppToastText(r && r.text)).length;
+      if (toastLines) res.regions = (res.regions || []).filter(r => !isAppToastText(r && r.text));
       // Направление чтения — отдельная настройка (dir), а не раскладка.
       const rtl = (this.dir || 'rtl') === 'rtl';
       let fresh;
@@ -639,6 +654,9 @@ const Reader = {
         .filter(l => !isTitleOrMarker(l.rawText || l.text, l, 1, medH))
         .filter(l => !isTitleOrMarker(l.text, l, 1, medH))
         .filter(l => !looksLikeJunkLine(l.text));
+      // Последняя страховка: распознанная строка не имеет права пропасть.
+      // Сюда попадаем уже после чистки и склейки — если строка выпала, вернём её.
+      fresh = attachLostLines(fresh, res.regions || [], medH);
       // Помечаем, на какой полосе нашлась реплика: в шторке видно, что
       // показано «на экране», а что распознано раньше с этой же страницы.
       const bandTop = band ? Math.round(band.y0) : 0;
@@ -2052,12 +2070,15 @@ const TTS = {
     // с начала, а не упираемся в тупик. Требование с телефона 21:54: на
     // вебтуне видно облачко с «УЖЕ ... ЧИНАТЬ ...», а приложение отвечало
     // «на этой полосе нет распознанного текста».
+    // ТОЛЬКО ТО, ЧТО В КАДРЕ. Здесь раньше стояла «страховка»: если в полосе
+    // текста нет — читаем всю страницу с начала. Из-за неё голос читал реплики,
+    // которых человек не видит, и помечал их «прочитано» — на телефоне 06.11,
+    // 10:33 это выглядело как «ты где-то реплики видишь, а я нет».
+    // Правильно — не читать за кадром, а ПЕРЕЙТИ к следующей полосе с текстом.
     if (!lines.length) {
       const data = Reader.regions.get(i);
       const all = (data && data.lines) || [];
-      const fresh = all.filter(l => !Reader.spoken.has(l.key || (l.page + '|' + l.text)));
-      if (fresh.length) lines = fresh;
-      else if (all.length && fromStart) lines = all;
+      if (all.length) return this.advanceReading();      // переход по полосам
     }
     if (!lines.length && Reader.visibleLines().length) {
       // На этой полосе всё прочитано — переходим к следующему куску.
@@ -2248,7 +2269,10 @@ const TTS = {
         // (например, текст попал в полосу, которую мы не считали текущей):
         // читаем их, а не прыгаем дальше молча.
         Reader.bandIndex = bands.length;
-        const rest = Reader.unspokenPage();
+        // «Остаток страницы» читаем, только если он действительно на экране.
+        // Иначе это снова чтение за кадром: реплики помечались прочитанными,
+        // а человек их не видел (06.11, 10:33).
+        const rest = Reader.unspokenInBand();
         if (rest.length) { Reader.page = page; return this.readQueue(rest); }
 
         // ── Следующая страница ────────────────────────────────────────────
@@ -2530,13 +2554,24 @@ async function renderTextSheet(i) {
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(l);
   }
-  const curTop = Reader.band && Number.isFinite(Reader.band.y0) ? Math.round(Reader.band.y0) : null;
+  // Что из списка РЕАЛЬНО на экране — считаем по геометрии кадра, а не по
+  // совпадению «метки полосы». Раньше метка ставилась по номеру полосы, и когда
+  // она не совпадала (полоса пересчиталась после прокрутки), весь список
+  // помечался «распознано раньше» — человек видел реплики, которых на экране
+  // нет, и не понимал, откуда они (телефон 06.11, 10:33).
+  const bandPx = (() => { try { return Reader.visibleBandPx(i); } catch (e) { return null; } })();
+  const cvH = (Reader.canvases[i] && Reader.canvases[i].height) || 0;
+  const onScreenLine = (l) => {
+    if (!bandPx || !cvH) return null;                        // полоса неизвестна
+    const t = (Number(l.top) || 0) * cvH, b = (Number(l.bottom) || 0) * cvH;
+    return b > bandPx.vy0 - 2 && t < bandPx.vy1 + 2;
+  };
   let counter = 0;
   $('#textOrdered').innerHTML = data.lines.length
     ? Array.from(groups.entries()).sort((a, b) => a[0] - b[0]).map(([top, list]) => {
-        const onScreen = curTop != null && Math.abs(top - curTop) < 12;
+        const onScreen = list.some(l => onScreenLine(l) === true);
         const head = groups.size > 1
-          ? `<div class="hint" style="margin:6px 0 2px">${onScreen ? '● на экране' : '○ распознано раньше'}</div>`
+          ? `<div class="hint" style="margin:6px 0 2px">${onScreen ? '● на экране' : '○ за кадром — доедем, когда прокрутите'}</div>`
           : '';
         return head + list.map((l) => {
           counter++;
@@ -2544,6 +2579,7 @@ async function renderTextSheet(i) {
           return `<div class="lineitem${l.large ? ' large' : ''}">`
             + `<b>${counter}</b>${done ? '<span class="done">✔ </span>' : ''}${escapeHtml(l.text)}`
             + (l.large ? '<span class="hint"> · крупный текст</span>' : '')
+            + (onScreenLine(l) === false ? '<span class="hint"> · за кадром</span>' : '')
             + (done ? '<span class="hint"> · прочитано</span>' : '') + '</div>';
         }).join('');
       }).join('')
