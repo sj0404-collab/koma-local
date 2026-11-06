@@ -1096,6 +1096,14 @@ const Journal = {
   /** Известные неполадки. status: fixed — исправлено, watch — под наблюдением, open — открыто. */
   known: [
     {
+      id: 'lines-lost-on-rerun',
+      title: 'Найденный текст пропадает после очередного прохода (3-го, 4-го)',
+      status: 'fixed', since: 'v1.9.101',
+      check: 'В шторке «Текст страницы» список «как читается» не должен укорачиваться после прокрутки или фоновой предзагрузки. В журнале при этом появляется строка «сохранено N реплик прежнего прохода».',
+      fix: 'Повторный проход полосы больше не заменяет её прежний результат: новая строка вытесняет старую только на том же месте и только если прочитана не хуже, остальные остаются. Автоматические проходы (прокрутка, предзагрузка, дочитывание, догон, очередь) не могут уменьшить список реплик страницы — недостающие возвращаются. Полный пересчёт остаётся только за явной кнопкой «Распознать заново».',
+      more: 'Если текст всё же пропал, пришлите строку журнала с этим проходом: значит строку выбросило не сравнение полос, а чистка мусора.',
+    },
+    {
       id: 'frame-not-covering-bubble',
       title: 'Рамка накрыла одну строку из нескольких, второй строки нет и в «как распознано»',
       status: 'watch', since: 'v1.9.99',
@@ -1270,7 +1278,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.100';
+const VERSION = 'v1.9.101';
 
 /* Формат сохранённого текста (не версия сборки!).
    Раньше буфер распознанного текста привязывался к VERSION, и КАЖДОЕ
@@ -9582,9 +9590,23 @@ const Reader = {
       fresh = fresh.map(l => ({ ...l, bandTop }));
       const at = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-      // Собираем полосы страницы: новая заменяет старую с тем же ключом,
-      // остальные остаются. Их реплики идут сверху вниз.
-      bandMap.set(bandKey, { lines: fresh, res, at });
+      // Собираем полосы страницы. Реплики этой же полосы НЕ выбрасываем:
+      // повторный проход (третий, четвёртый — «заново», «дочитывание»,
+      // «предзагрузка») иногда находит меньше строк, чем первый, и раньше
+      // новый результат ЗАМЕНЯЛ старый — уже распознанный текст неожиданно
+      // пропадал (жалоба 06.11, 22:0x: «после распознавания текст, который он
+      // сканировал, теряется на последнем проходе»). Теперь объединяем:
+      // новая строка того же места вытесняет старую только если прочитана не
+      // хуже (оценка текста), иначе остаётся прежняя.
+      const prevPart = bandMap.get(bandKey);
+      const mergedLines = keepOldLines(prevPart && prevPart.lines, fresh);
+      if (prevPart && mergedLines.length !== fresh.length) {
+        try {
+          Journal.add('распознавание', 'полоса ' + (bandKey === 'full' ? 'вся' : 'на экране')
+            + ': сохранено ' + (mergedLines.length - fresh.length) + ' реплик прежнего прохода');
+        } catch (e) { /* нет журнала */ }
+      }
+      bandMap.set(bandKey, { lines: mergedLines, res, at });
       const detPass = res.detPass || 'normal';
       const largePasses = res.largePasses || 0;
       this.bandCache.set(i, bandMap);
@@ -9632,7 +9654,27 @@ const Reader = {
           const yb = b[1].res.band ? b[1].res.band.y0 : 0;
           return ya - yb;
         });
-      const lines = mergeBandLines(parts.map(([, part]) => part), c);
+      let lines = mergeBandLines(parts.map(([, part]) => part), c);
+      // ── Страховка от потери уже найденного ────────────────────────────────
+      // Автоматический проход (прокрутка, предзагрузка, дочитывание, очередь)
+      // не должен УМЕНЬШАТЬ список реплик страницы: человек видел текст, а
+      // после очередного прохода он пропал. Если проход не по прямому
+      // требованию («заново», кнопка, ручное выделение) — недостающие реплики
+      // возвращаем. Явный пересчёт по кнопке остаётся полным пересчётом:
+      // иначе старые строки закреплялись бы навсегда.
+      const autoPass = silent
+        || /прокрутка|предзагрузка|дочитывание|догон|целая страница|очередь|заранее|контроль конца/i.test(String(opts.tag || ''));
+      const prevPage = this.regions.get(i);
+      if (autoPass && prevPage && Array.isArray(prevPage.lines) && prevPage.lines.length) {
+        const before = lines.length;
+        lines = keepOldLines(prevPage.lines, lines);
+        if (lines.length > before) {
+          try {
+            Journal.add('распознавание', 'страница ' + (i + 1) + ': сохранено '
+              + (lines.length - before) + ' реплик прежнего прохода (проход «' + (opts.tag || 'без метки') + '»)');
+          } catch (e) { /* нет журнала */ }
+        }
+      }
       const total = parts.reduce((acc, [, p]) => acc + (p.res.ms || 0), 0);
       this.regions.set(i, {
         ...res, lines, at, bands: parts.length,
@@ -12338,6 +12380,37 @@ function dedupeRepeatText(text) {
     }
   }
   return src;
+}
+
+/**
+ * Старые реплики полосы + новые с той же полосы = ничего не теряем.
+ *
+ * Повторный проход не обязан найти всё, что нашёл первый: кадр мог уехать,
+ * детектор — недосмотреть, дочитывание — отдать часть строк. Раньше результат
+ * нового прохода ЗАМЕНЯЛ прежний, и уже распознанный текст исчезал у человека
+ * на глазах («теряется на последнем проходе»). Здесь объединение: реплика
+ * нового прохода вытесняет старую только на том же месте и только если
+ * прочитана не хуже.
+ */
+function keepOldLines(prev, fresh) {
+  const list = Array.isArray(prev) ? prev : [];
+  const out = (Array.isArray(fresh) ? fresh : []).slice();
+  if (!list.length) return out;
+  const near = (a, b) => {
+    const ha = Math.max(1e-6, a.bottom - a.top), hb = Math.max(1e-6, b.bottom - b.top);
+    const wa = Math.max(1e-6, a.right - a.left), wb = Math.max(1e-6, b.right - b.left);
+    const ov = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    const oh = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+    return ov > Math.min(ha, hb) * 0.35 && oh > Math.min(wa, wb) * 0.3;
+  };
+  for (const o of list) {
+    const i = out.findIndex(n => near(o, n));
+    if (i < 0) { out.push(o); continue; }
+    const scoreNew = textScore(out[i].text);
+    const scoreOld = textScore(o.text);
+    if (scoreOld > scoreNew + 0.01) out[i] = o;      // прежнее чтение лучше
+  }
+  return out.sort((a, b) => (a.top - b.top) || (a.left - b.left));
 }
 
 function mergeBandLines(parts, canvas) {
