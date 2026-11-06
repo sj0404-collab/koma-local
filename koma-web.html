@@ -2988,9 +2988,9 @@ const Journal = {
     {
       id: 'manual-area',
       title: 'Реплика распознана не целиком («НОНО» вместо «ПОНЯТНО»)',
-      status: 'watch', since: 'v1.9.99',
+      status: 'watch', since: 'v1.9.100',
       check: 'Нажмите «⬚» на нижней панели (или «Распознать вручную» в шторке «Текст страницы»), проведите рамку вокруг облачка и нажмите «⬚» ещё раз. В журнале появится «выделено вручную: «…»».',
-      fix: 'Выделенная область вырезается из страницы, увеличивается и распознаётся отдельно от полосы; её текст встаёт на место прежних реплик внутри выделения и сразу читается вслух. Двойной тап убран: на телефоне он попадал в системное меню картинки и не засчитывался.',
+      fix: 'Выделение читается двумя независимыми способами — как полоса всей страницы (на тёмной странице ещё и бинаризованной) и как вырезанный кроп с перебором увеличений и подготовок; из двух берётся чтение с лучшей оценкой (словарные слова минус слипшиеся), и только если оно лучше уже прочитанного. Раньше кнопка могла заменить нормальный текст мусором — теперь не может. Двойной тап убран: на телефоне он попадал в системное меню картинки и не засчитывался.',
       more: 'Если и в ручном режиме текст тот же и неверный — пришлите строку из журнала: значит движок не читает этот шрифт, и это уже про модель, а не про конвейер.',
     },
     {
@@ -3152,7 +3152,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.99';
+const VERSION = 'v1.9.100';
 
 /* Формат сохранённого текста (не версия сборки!).
    Раньше буфер распознанного текста привязывался к VERSION, и КАЖДОЕ
@@ -10536,14 +10536,17 @@ const Reader = {
     // результате поднимаем увеличение. При равном счёте остаётся меньшее:
     // лишние пиксели ничего не добавили.
     const k0 = clamp(Math.round(1500 / Math.max(sw, sh)), 1, 4);
-    let best = await runPass(1);
-    if (k0 > 1) {
-      const bigger = await runPass(k0);
-      if (bigger && (!best || bigger.score > best.score + 0.01)) best = bigger;
-    }
-    if ((!best || best.score < 2.0) && k0 > 1 && k0 < 4) {
-      const mid = await runPass(Math.min(3, k0));
-      if (mid && (!best || mid.score > best.score + 0.01)) best = mid;
+    // Перебираем увеличения от нативного к большему и останавливаемся, как
+    // только чтение стало уверенным. Диагностика 06.11 на мелком кропе
+    // (200x50) показала: k=1 и k=4 дают латиницу вместо кириллицы
+    // («HacлeqHuкa»), а бинаризация при k=2–3 — верные буквы. Поэтому в
+    // наборе все ступени, а не «нативный + расчётный», как было.
+    const ks = Array.from(new Set([1, 2, 3, k0])).filter(k => k >= 1 && k <= 4).sort((a, b) => a - b);
+    let best = null;
+    for (const k of ks) {
+      const pass = await runPass(k);
+      if (pass && (!best || pass.score > best.score + 0.01)) best = pass;
+      if (best && best.score >= 14) break;       // текст уверенный — не жжём время
     }
     // Слабый результат (одно-два словарных слова) — пробуем крупнее: мелкий
     // каллиграфический шрифт читается только при увеличении 3–4x. Так «Исп» и
@@ -10705,37 +10708,136 @@ const Reader = {
     if (typeof OCR === 'undefined' || !OCR.ready) { toast('Сначала добавьте модели OCR (⚙ → Модели)'); return; }
     const c = this.canvases[page];
     if (!c || !c.width) { toast('Страница ещё не готова', 3000); return; }
-    soft('Распознаю выделенную область…', 4000);
-    // Читаем кроп ТЕМ ЖЕ механизмом, что и перечитывание реплики: несколько
-    // подготовок (кроп, контраст, ч/б) и второй проход крупнее, из них берётся
-    // лучший по оценке текста. На этом стенде именно так «ТВ ИДИШЬ» стало
-    // «ТЫ ВИДИШЬ МЕНЯ?» — простое увеличение кропа ошибочно.
-    let got = null;
+    soft('Распознаю выделенную область…', 6000);
+    // ── Как читаем выделение ─────────────────────────────────────────────
+    // Сначала — как ПОЛОСУ ВСЕЙ СТРАНИЦЫ: движку уходит кадр шириной во всю
+    // страницу в нативном масштабе, а видимость ограничена вертикальными
+    // границами выделения. Это ровно тот путь, которым страница читается
+    // обычно, поэтому текст получается обычного качества.
+    //
+    // Так делать пришлось после телефона 06.11, 21:34: первый вариант резал
+    // выделение отдельным кропом и увеличивал его в 4 раза — и детектор на
+    // увеличенном огрызке разваливал строки на обрывки: «разомпа Так пм
+    // чИЛно» вместо «таким образом Пантею…», «ИНолишилвейнам (Но» вместо
+    // «И спокойно лишил Фейна титула наследника?».
+    const H = c.height, W = c.width;
+    const bandPx = {
+      y0: Math.max(0, Math.round(frac.top * H)),
+      y1: Math.min(H, Math.round(frac.bottom * H)),
+    };
+    const boxPx = {
+      left: frac.left * W, right: frac.right * W,
+      top: bandPx.y0, bottom: bandPx.y1,
+    };
+    const inside = (l) => {
+      const ix = Math.min(l.right * W, boxPx.right) - Math.max(l.left * W, boxPx.left);
+      const iy = Math.min(l.bottom * H, boxPx.bottom) - Math.max(l.top * H, boxPx.top);
+      if (ix <= 0 || iy <= 0) return false;
+      const own = Math.max(1e-6, (l.right - l.left) * W) * Math.max(1e-6, (l.bottom - l.top) * H);
+      // Берём строки, которые в основном ВНУТРИ выделения. Строка облачка
+      // обычно шире пальца и торчит за рамку — «в основном внутри» это ловит.
+      return (ix * iy) / own >= 0.35;
+    };
+    const readBand = async () => {
+      // Тёмная страница — отдельная беда: на чёрном фоне с обводкой буквы
+      // читаются хуже всего. Поэтому для такой страницы полосу прогоняем ещё
+      // и бинаризованной (это же лечение, что помогает кропу). Победителя
+      // выбирает оценка текста.
+      const sources = [c];
+      try {
+        const probe = makeCanvas(c.width, Math.max(1, bandPx.y1 - bandPx.y0));
+        probe.getContext('2d', { willReadFrequently: true })
+          .drawImage(c, 0, bandPx.y0, c.width, probe.height, 0, 0, c.width, probe.height);
+        const px = probe.getContext('2d').getImageData(0, 0, probe.width, probe.height).data;
+        if (meanLumaOf(px) < 118) sources.push(binarizeCanvas(c, 0, RULES));
+      } catch (e) { /* без бинаризации */ }
+      let best = null;
+      for (const srcCanvas of sources) {
+        let res = null;
+        try { res = await recognizePage(srcCanvas, RULES, () => {}, bandPx, null); } catch (e) { res = null; }
+        const rows = ((res && res.regions) || []).filter(r => r && r.text && r.bottom > r.top && inside(r))
+          .sort((a, b) => (a.top - b.top) || (a.left - b.left));
+        if (!rows.length) continue;
+        const raw0 = rows.map(r => r.text).join(' ');
+        let t0 = raw0;
+        try { t0 = cleanSpeech(raw0); } catch (e) { /* без чистки */ }
+        t0 = dehyphenText(String(t0 || '')).replace(/\s+/g, ' ').trim();
+        const sc = textScore(t0);
+        if (!best || sc > best.score) {
+          best = {
+            text: t0, raw: raw0, score: sc,
+            bbox: {
+              left: Math.max(frac.left * 0.98, Math.min(...rows.map(r => r.left))),
+              right: Math.min(frac.right * 1.02, Math.max(...rows.map(r => r.right))),
+              top: Math.max(frac.top, Math.min(...rows.map(r => r.top))),
+              bottom: Math.min(frac.bottom, Math.max(...rows.map(r => r.bottom))),
+            },
+          };
+        }
+      }
+      if (!best) return null;
+      return best;
+    };
+    // Запасной путь — вырезанный кроп с перебором подготовок и увеличений.
+    const readCrop = async () => {
+      try { return await this.ocrLineCrop(page, { left: frac.left, top: frac.top, right: frac.right, bottom: frac.bottom }); }
+      catch (e) { return null; }
+    };
+    let got = await readBand();
+    const bandText = got && got.text;
+    const bandScore = got && got.score;
+    // Кроп читаем ВСЕГДА, а не только при неудаче полосы: на телефоне
+    // (06.11, 21:34–21:36) полоса отдавала «уланаслегника?», «Нянежалуюсь»,
+    // а бинаризованный кроп на тех же пикселях — «тула наследника?». Из двух
+    // чтений берём то, что выше по оценке текста (словарные слова минус
+    // слипшиеся).
+    const alt = await readCrop();
+    let src = 'полоса';
+    if (alt && (!got || alt.score > got.score + 0.01)) { got = alt; src = 'кроп'; }
+    // В журнал — оба чтения: без этого нельзя понять, почему ручное
+    // распознавание дало не то, что ждал человек (телефон 06.11, 21:34).
     try {
-      got = await this.ocrLineCrop(page, { left: frac.left, top: frac.top, right: frac.right, bottom: frac.bottom });
-    } catch (e) { got = null; }
+      Journal.add('распознавание', 'ручное выделение, кандидаты: полоса «'
+        + String((bandText || '').slice(0, 40)) + '» (' + (bandScore == null ? '—' : bandScore.toFixed(1))
+        + '), кроп «' + String((alt && alt.text) || '').slice(0, 40) + '» ('
+        + (alt && alt.score != null ? alt.score.toFixed(1) : '—') + ') → выбрано: ' + src);
+    } catch (e) { /* журнала может не быть */ }
     if (!got || !got.text) { toast('В этой области текст не читается — выделите плотнее', 4000); return; }
-    const text = got.text;
     const data = this.regions.get(page) || { lines: [] };
-    const area = got.bbox || frac;
-    // Убираем прежние реплики, которые попали внутрь выделения (их центр
-    // внутри новой рамки): их текст заменяет новое, полное чтение.
+    // Прежние реплики, чей центр внутри выделения.
     const centreIn = (l) => {
       const cx = (l.left + l.right) / 2, cy = (l.top + l.bottom) / 2;
       return cx >= frac.left - 0.01 && cx <= frac.right + 0.01
         && cy >= frac.top - 0.01 && cy <= frac.bottom + 0.01;
     };
+    const old = (data.lines || []).filter(centreIn);
     const kept = (data.lines || []).filter(l => !centreIn(l));
+    // Кнопка НЕ ИМЕЕТ ПРАВА сделать хуже. Автопроход на этой странице уже
+    // прочитал «тула наследника?» (с пробелами), а кроп из выделения даёт
+    // «НКА АСАЕ9НИ» — если бы мы просто вставили новое чтение, стало бы хуже
+    // (стенд 06.11). Поэтому сравниваем оценки и оставляем лучшее.
+    let useText = got.text, useRaw = got.raw || got.text, note = 'новое чтение';
+    const oldBest = old.map(l => ({ text: l.text, score: textScore(l.text) }))
+      .sort((x, y) => y.score - x.score)[0];
+    if (oldBest && oldBest.score >= got.score + 0.01) {
+      useText = old.map(l => l.text).join(' ');
+      useRaw = useText;
+      note = 'оставлено прежнее';
+    }
+    const area = got.bbox || frac;
     const added = {
       left: area.left, right: area.right, top: area.top, bottom: area.bottom,
-      text, rawText: got.raw || text, manual: true, confidence: 1, fromPick: true,
+      text: useText, rawText: useRaw, manual: true, confidence: 1, fromPick: true,
     };
     const lines = kept.concat([added]).sort((a, b) => (a.top - b.top) || (a.left - b.left));
     this.regions.set(page, { ...data, lines });
     try { await this.savePageBuffer(page); } catch (e) { /* не критично */ }
     this.paintPage(page);
-    try { Journal.add('распознавание', 'выделено вручную: «' + text.slice(0, 60) + '»'); } catch (e) { /* нет журнала */ }
-    toast('Распознано вручную: «' + text.slice(0, 46) + (text.length > 46 ? '…' : '') + '»', 3500);
+    try {
+      Journal.add('распознавание', 'выделено вручную (' + note + '): «' + useText.slice(0, 60) + '»');
+    } catch (e) { /* нет журнала */ }
+    toast((note === 'оставлено прежнее' ? 'Движок прочитал хуже — оставил: «' : 'Распознано вручную: «')
+      + useText.slice(0, 44) + (useText.length > 44 ? '…' : '') + '»', 3500);
     this.page = page;
     if (typeof TTS !== 'undefined' && TTS) { try { TTS.prime(); TTS.speakLine(added); } catch (e) { /* голос не обязателен */ } }
   },
@@ -14039,22 +14141,34 @@ function textBetter(newT, oldT) {
 
 function textScore(t) {
   const s = String(t || '');
-  const words = s.split(/[^\p{L}\p{N}-]+/u).filter(Boolean);
+  // Дефис — РАЗДЕЛИТЕЛЬ: «ХА-А» — это «ха» + «а», и такое чтение ценнее
+  // обрубка «А-А» (стенд 06.11: кроп терял первую букву, а оценка этого не
+  // видела, потому что «ха-а» целиком в словаре, конечно, нет).
+  const words = s.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
   if (!words.length) return -1e9;
+  // Оценка ВЗВЕШЕНА ПО ДЛИНЕ СЛОВА. Прежняя (по слову «+3 за словарное»)
+  // сравнивала несравнимое: чтение «ИН» из двух букв получало 5 и обыгрывало
+  // полное «Ноя не жалуюсь на урезание расходов» — стенд 06.11 это поймал,
+  // и в ручное распознавание попадал мусор из двух букв.
   let score = 0;
   for (const w of words) {
     const low = w.toLowerCase().replace(/-/g, '');
-    if (low.length < 2) { score -= 1; continue; }
-    let known = false;
-    try { known = !!(typeof Words !== 'undefined' && Words.isKnown && Words.isKnown(low)); } catch (e) { known = false; }
-    // Частотность решает спор равных кандидатов. Стенд 06.11: на одном и том
-    // же кропе чтец давал «ТЫ ВИДИШЬ МЕНЯ?» и «ТВ ВИДИШЬ МЕНЯ?»; оба слова
-    // словарные, счёт был равный, и выбиралось первое попавшееся — «ТВ»
-    // (4855-е слово). «ты» — 5-е. Частое слово и есть настоящее.
-    let rank = undefined;
-    try { rank = (typeof Words !== 'undefined' && Words.rank && Words.rank.get(low)); } catch (e) { rank = undefined; }
-    score += known ? 3 + (rank === undefined ? 0 : 2 * Math.max(0, 1 - rank / 20000)) : 0;
-    score += Math.min(low.length, 12) * 0.05;
+    if (low.length < 2) { score -= 0.5; continue; }
+    let known = false, rank;
+    try {
+      known = !!(typeof Words !== 'undefined' && Words.isKnown && Words.isKnown(low));
+      rank = (typeof Words !== 'undefined' && Words.rank) ? Words.rank.get(low) : undefined;
+    } catch (e) { known = false; }
+    if (known) {
+      // Словарное слово: тем ценнее, чем оно длиннее и чем чаще встречается.
+      score += low.length + (rank === undefined ? 0 : 0.4 * Math.max(0, 1 - rank / 20000));
+    } else if (low.length >= 14) {
+      score -= 1.4 * low.length;     // слипшаяся фраза («туланаследника», «Ноянежалуюсь»)
+    } else if (low.length >= 9) {
+      score -= 0.8 * low.length;     // длинное незнакомое — скорее мусор
+    } else {
+      score += 0.25 * low.length;    // имя, звук, редкое слово — это норма
+    }
   }
   // Мусор внутри слова (двоеточия, чёрточки посреди капса) — минус.
   score -= (s.match(/[\p{L}][:;|_/\\][\p{L}]/gu) || []).length * 2;
