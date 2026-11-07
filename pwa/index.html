@@ -2978,6 +2978,14 @@ const Journal = {
   /** Известные неполадки. status: fixed — исправлено, watch — под наблюдением, open — открыто. */
   known: [
     {
+      id: 'text-doubled-in-replica',
+      title: 'Реплика задваивается: «МУСОР. МУСОР.», «ВАШЕ ТПРЕ- ВАШЕ ПРЕВОСХОДИТЕЛЬСТВО, Я…»',
+      status: 'fixed', since: 'v1.9.103',
+      check: 'В шторке «Текст страницы» реплика должна читаться один раз: одна надпись — одна фраза. Повтор слова через точку или приклеенный в начало обрывок той же фразы — дефект.',
+      fix: 'Три причины, все три закрыты. (1) Обводка надписи заставляла детектор найти две строки, и обе распознавались одинаково — теперь реплика из двух одинаковых кусков схлопывается в один (живые повторы «НЕТ! НЕТ!» не трогаются). (2) Страховки «потерянных строк» возвращали в реплику строку, которая уже есть, но прочитана с одной лишней буквой («СТО, Я…» против «…СТВО, Я…») — теперь сравнение терпимо к одной букве. (3) Реплика из одной буквы («о») больше не попадает в чтение и не приклеивается к облачку.',
+      more: 'Если дубль всё же виден — пришлите строку журнала с этим проходом и скриншот: значит повторов больше двух («ЕЁ ЕЁ ВЕЛИЧЕСТВО»), это следующий шаг.',
+    },
+    {
       id: 'title-rows-order',
       title: 'Строки одного облачка читаются в перепутанном порядке («Как прожить сестрой тирана. жизнь будучи старшей»)',
       status: 'fixed', since: 'v1.9.102',
@@ -3168,7 +3176,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.102';
+const VERSION = 'v1.9.103';
 
 /* Формат сохранённого текста (не версия сборки!).
    Раньше буфер распознанного текста привязывался к VERSION, и КАЖДОЕ
@@ -5215,7 +5223,20 @@ function attachLostLines(replicas, rawRegions, medH) {
       const w4 = w.slice(0, 4);
       if (joined.includes(w) || (w.length >= 5 && joined.includes(w4))) hit++;
     }
-    return hit / words.length >= 0.6;
+    if (hit / words.length >= 0.6) return true;
+    // Слово с одной лишней/потерянной буквой: «ВАШЕ ТПРЕ-» из облачка, где
+    // текст уже собран как «ВАШЕ ПРЕВОСХОДИТЕЛЬСТВО…». Раньше такая строка
+    // считалась потерянной и возвращалась в начало реплики — текст становился
+    // «ВАШЕ ТПРЕ- ВАШЕ ПРЕВОСХОДИТЕЛЬСТВО, Я.…» (прогон 07.11, глава 48).
+    if (k.length < 6) return false;
+    for (const l of list) {
+      const hay = key(l && l.text);
+      if (!hay) continue;
+      const head = hay.slice(0, k.length + 6), tail = hay.slice(-(k.length + 6));
+      if (lcsLen(k, head) / k.length >= 0.8) return true;
+      if (lcsLen(k, tail) / k.length >= 0.8) return true;
+    }
+    return false;
   };
   const lost = [];
   for (const r of raw) {
@@ -5393,6 +5414,31 @@ function isTitleOrMarker(text, line, pageHeight, medHeight) {
   return false;
 }
 
+/**
+ * Одна и та же надпись, прочитанная дважды, — одна надпись.
+ *
+ * На тёмном облачке «МУСОР.» детектор нашёл две строки (обводка и сама надпись),
+ * обе распознались одинаково, и в чтение ушло «МУСОР. МУСОР.» (прогон 07.11,
+ * глава 48, стр. 6). Правило узкое: реплика целиком состоит из ДВУХ одинаковых
+ * кусков, в ней нет «! ? …» (живые повторы «НЕТ! НЕТ!» не трогаем) и в куске не
+ * меньше четырёх букв («НЕТ, НЕТ.» остаётся как есть).
+ */
+function collapseSameTwice(text) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!s) return s;
+  const words = s.split(' ');
+  if (words.length < 2 || words.length % 2) return s;
+  const half = words.length / 2;
+  const a = words.slice(0, half).join(' ');
+  const b = words.slice(half).join(' ');
+  const lettersOf = (v) => (v.match(/\p{L}/gu) || []).join('').toLowerCase();
+  const la = lettersOf(a);
+  if (la.length < 4) return s;
+  if (la !== lettersOf(b)) return s;
+  if (/[!?…]/u.test(s)) return s;
+  return a;
+}
+
 function trimJunkEdges(text) {
   const tokens = String(text || '').split(' ').filter(Boolean);
   // «НО...», «ДА!», «НЕ…» — настоящие слова, а не звуковой эффект. Правило
@@ -5568,6 +5614,11 @@ function isJunkReplica(text) {
   const letters = (t.match(/\p{L}/gu) || []).length;
   if (!letters) return true;
   if (/(\p{L})\1\1/iu.test(t)) return true;      // «оооо»
+  // Одна буква — не реплика. «о» приезжало обрывком чужой строки и попадало в
+  // чтение отдельной репликой; в прогоне 07.11 (глава 48) такой обрывок ещё и
+  // склеивался с облачком «ВАШЕ ПРЕВОСХОДИТЕЛЬСТВО, Я…». «Я» оставляем: это
+  // настоящее слово и настоящая реплика.
+  if (letters === 1 && !/^\s*[яЯ]\s*[.!…?]?\s*$/.test(t)) return true;
   // Однобуквенное «слово», которого в русском нет, — признак мусора, но
   // только в КОРОТКОЙ реплике: в длинной это может быть случайная буква
   // («строка абзаца 10» после правки похожих букв), и терять из-за неё всю
@@ -9215,6 +9266,8 @@ function bubblesOf(group, rtl, R) {
       text += t;
     });
     text = cleanSpeech(text);
+    // Двойное чтение одной надписи («МУСОР. МУСОР.») — это одна реплика.
+    text = collapseSameTwice(text);
     const box = {
       text,
       left: Math.min(...block.map(r => r.left)), top: Math.min(...block.map(r => r.top)),
@@ -9239,7 +9292,16 @@ function bubblesOf(group, rtl, R) {
   const merged = orderBubbles(absorbOrphans(mergeBubbles(lines, bubbleGap, R.mergeHeightRatio)), rtl);
   // Реплика-мусор в озвучку не идёт: «е ой», «Тг. чв». Настоящие короткие
   // реплики («ДА», «НЕТ!») остаются — в них слова из словаря, а не обрывки.
-  return dropCoveredDuplicates(merged.filter(b => !isJunkReplica(b.text)));
+  // Собираем реплики — и только потом схлопываем двойное чтение: две строки
+  // одной надписи («МУСОР.» обводкой и самой надписью) склеиваются здесь, уже
+  // после mergeBubbles, поэтому проверка нужна на готовом тексте.
+  const cleaned = merged
+    .filter(b => !isJunkReplica(b.text))
+    .map(b => {
+      const t = collapseSameTwice(b.text);
+      return t === b.text ? b : { ...b, text: t };
+    });
+  return dropCoveredDuplicates(cleaned);
 }
 
 /**
@@ -9890,7 +9952,33 @@ function alreadyInside(key, text) {
     for (let j = 0; j < win; j++) if (flat[i + j] === k[j]) same++;
     if (same / win >= 0.75) return true;
   }
+  // Тот же обрывок, прочитанный с ОДНОЙ лишней буквой, по позициям не ловится:
+  // «СТО, Я…» против уже собранного «…ПРЕВОСХОДИТЕЛЬСТВО, Я…» (лишняя «В»).
+  // Сравниваем как подпоследовательность (LCS) с окнами на одну-две буквы
+  // длиннее: живой прогон 07.11 — в реплику уехал хвост «СТО, Я…», и текст стал
+  // «ВАШЕ ПРЕВОСХОДИТЕЛЬСТВО, Я.… СТО, Я.…» (каша вместо одной фразы).
+  if (k.length >= 3) {
+    for (let i = 0; i + k.length <= flat.length; i++) {
+      const w = flat.slice(i, i + k.length + 2);
+      if (lcsLen(k, w) / k.length >= 0.8) return true;
+    }
+  }
   return false;
+}
+
+/** Длина наибольшей общей подпоследовательности — для сравнения обрывков. */
+function lcsLen(a, b) {
+  const s = String(a || ''), t = String(b || '');
+  if (!s.length || !t.length) return 0;
+  let prev = new Array(t.length + 1).fill(0);
+  for (let i = 1; i <= s.length; i++) {
+    const cur = new Array(t.length + 1).fill(0);
+    for (let j = 1; j <= t.length; j++) {
+      cur[j] = s[i - 1] === t[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1]);
+    }
+    prev = cur;
+  }
+  return prev[t.length];
 }
 
 /**
