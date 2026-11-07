@@ -10,6 +10,13 @@ const DEFAULT_RULES = {
   rescueMinRegions: 600, pageSide: 1600, rescueSide: 960, minConfidence: 0.25,
   cutMargin: 0.06, bandOverlap: 0, bandsMax: 8, wholeThreshold: 0.72,
   bubbleGap: 0.45, mergeHeightRatio: 1.8,
+  // Потолки «облачка» — отдельно для постраничной манги и для ленты.
+  // У ленты нет страниц-кадров: облачко в ней может занимать больше
+  // кадра, и потолок 0,22 рвал его на две реплики.
+  maxBlock: 0.22, maxTight: 0.42,
+  // Тип книги: auto (по геометрии главы), page (манга постранично),
+  // strip (вебтун/манхва — непрерывная лента).
+  layoutMode: 'auto',
   speechRate: 0, autoScrollStep: 0.25, semiManual: false, semiManualSettleMs: 700,
   detRetry: true,          // повтор детектора с ImageNet-нормой, только если боксов 0
   largeText: true,         // второй проход по трудному тексту (каллиграфия, крупный шрифт)
@@ -120,6 +127,8 @@ function sanitizeRules(r, overrides) {
   num('minConfidence', 0, 1); num('cutMargin', 0, .4); num('bandOverlap', 0, .5);
   num('bandsMax', 1, 32); num('wholeThreshold', .3, 1); num('bubbleGap', .05, 3);
   num('mergeHeightRatio', 1.05, 6); num('speechRate', 0, 3); num('autoScrollStep', .05, .9);
+  num('maxBlock', .1, .8); num('maxTight', .1, .9);
+  R.layoutMode = (R.layoutMode === 'page' || R.layoutMode === 'strip') ? R.layoutMode : 'auto';
   num('semiManualSettleMs', 0, 5000);
   // Скорость прокрутки — отдельно от скорости голоса: это про движение ленты.
   num('scrollSpeed', .25, 2);
@@ -151,6 +160,54 @@ function sanitizeRules(r, overrides) {
   R.ocrEngine = (R.ocrEngine === 'native' || R.ocrEngine === 'wasm') ? R.ocrEngine : 'auto';
   R.frames = R.frames !== false;
   return R;
+}
+
+/*
+ * ПРОФИЛИ РАСКЛАДКИ: манга постранично и вебтун-лента — разные книги.
+ *
+ * Просьба с телефона 07.11: «для каждого типа манга либо вебтун свои изменения
+ * под каждый, чинить отдельно, со своими настройками». Правила чтения одни и
+ * те же, но ЧИСЛА у них разные, и это не косметика:
+ *
+ *   · постраничная манга — кадр конечен, облачко редко выше 22 % страницы.
+ *     Автопереход на следующую страницу по умолчанию ВЫКЛЮЧЕН: за границу
+ *     страницы голос едет только по ▶ (жалоба 4.11 «голос уехал сам»).
+ *   · вебтун — кадр бесконечный, облачко бывает выше 22 %, а «страниц» внутри
+ *     главы нет: реплики идут непрерывно, автопереход обязан быть включён.
+ *
+ * Какой профиль взять: RULES.layoutMode ('auto' — по раскладке читалки,
+ * 'page'/'strip' — выставлено человеком в настройках). Тип манги при этом
+ * только ВЫБИРАЕТ числа, сам конвейер распознавания остаётся один — иначе
+ * пришлось бы держать две копии движка.
+ */
+const LAYOUT_PROFILES = {
+  page: {
+    maxBlock: 0.22,          // облачко выше 22 % страницы — это абзац/колонка
+    maxTight: 0.42,          // плотное облачко, но не выше 42 %
+    bubbleGap: 0.45,         // зазор между строками одного облачка
+    mergeHeightRatio: 1.8,   // строки одной высоты — одна реплика
+    autoPage: false,         // за границу страницы — только по ▶
+  },
+  strip: {
+    maxBlock: 0.34,
+    maxTight: 0.60,          // в ленте облачко на пол-кадра — норма
+    bubbleGap: 0.60,
+    mergeHeightRatio: 2.2,
+    autoPage: true,          // в ленте «страниц» нет: голос едет дальше сам
+  },
+};
+
+/** Тип книги по текущим правилам и раскладке читалки. */
+function layoutKindOf(R, isStrip) {
+  const mode = (R && R.layoutMode) || 'auto';
+  if (mode === 'page' || mode === 'strip') return mode;
+  return isStrip ? 'strip' : 'page';
+}
+
+/** Правила с числами выбранного профиля (сам RULES не меняем). */
+function rulesWithProfile(R, kind) {
+  const p = LAYOUT_PROFILES[kind] || LAYOUT_PROFILES.page;
+  return { ...R, ...p, layoutKind: kind };
 }
 
 /* ───────────────────────── 4b. Починка текста (порт KomaText.kt) ─────────────────────────
@@ -4992,8 +5049,11 @@ function bubblesOf(group, rtl, R) {
   // одна «реплика» на 75 слов. Для манги правило безвредно: облачко редко выше
   // четверти страницы, а если и выше — его строки идут плотно, и разрез по
   // самому большому пробелу всё равно придётся на пустое место.
-  const MAX_BLOCK = 0.22;                      // доля высоты страницы
-  const MAX_TIGHT = 0.42;                      // плотное облачко — до 42 %
+  // Потолки берутся из профиля раскладки: у ленты облачко бывает выше, чем
+  // у страницы манги (см. LAYOUT_PROFILES). Раньше здесь стояли числа 0,22/0,42
+  // намертво — и в вебтуне высокое облачко рвалось на две реплики.
+  const MAX_BLOCK = Number(R.maxBlock) || 0.22;   // доля высоты страницы
+  const MAX_TIGHT = Number(R.maxTight) || 0.42;   // плотное облачко
   const splitTall = (block) => {
     if (block.length < 4) return [block];
     const span = (b) => Math.max(...b.map(r => r.bottom)) - Math.min(...b.map(r => r.top));

@@ -791,15 +791,26 @@
          Раньше был один набор, и приходилось гадать, к чему он относится. -->
     <div class="lbl" style="margin-top:8px">ЭТА КНИГА <span id="profState" class="hint"></span></div>
     <div class="chips" id="modeChips">
-      <button class="chip" data-mode="vertical">Лента · листаю сам, без голоса</button>
+      <button class="chip" data-mode="vertical">Лента · вебтун, непрерывно</button>
       <button class="chip" data-mode="rtl">Страницы справа налево · манга</button>
       <button class="chip" data-mode="ltr">Страницы слева направо · комикс</button>
     </div>
+    <div class="lbl" style="margin-top:14px">ТИП КНИГИ (свои числа для манги и для ленты)</div>
+    <div class="chips" id="layoutChips">
+      <button class="chip" data-layout="auto">Как есть — по раскладке</button>
+      <button class="chip" data-layout="page">Манга постранично</button>
+      <button class="chip" data-layout="strip">Вебтун, лента</button>
+    </div>
+    <div class="hint" id="layoutHint" style="margin-top:6px">У манги облачко считается по странице и голос сам за границу страницы не едет. У вебтуна страниц нет: облачко бывает выше, и голос идёт по ленте дальше сам.</div>
     <div class="lbl" style="margin-top:14px">НАЧАЛО ЧТЕНИЯ ДЛЯ ЭТОЙ КНИГИ</div>
     <div class="chips" id="dirChips">
       <button class="chip" data-dir="rtl">Справа налево (манга)</button>
       <button class="chip" data-dir="ltr">Слева направо (комикс)</button>
     </div>
+    <label class="row" style="justify-content:space-between;padding:8px 0 2px">
+      <span>Идти по главе дальше сам <span class="hint">(следующая страница без ▶)</span></span>
+      <input type="checkbox" id="cbAutoPage">
+    </label>
     <label class="row" style="justify-content:space-between;padding:8px 0 2px">
       <span>Голос у этой книги</span>
       <input type="checkbox" id="cbVoiceBook">
@@ -1096,6 +1107,22 @@ const Journal = {
   /** Известные неполадки. status: fixed — исправлено, watch — под наблюдением, open — открыто. */
   known: [
     {
+      id: 'layout-profiles',
+      title: 'Манга и вебтун лечатся одним набором чисел (в ленте голос «листает дальше», облачко рвётся)',
+      status: 'fixed', since: 'v1.9.104',
+      check: '⚙ → «Голос и чтение» → блок «ТИП КНИГИ»: под чипами подписано, какая раскладка раскрыта и какой профиль применён. В журнале строка «тип книги: лента/страницы».',
+      fix: 'Числа чтения разделены на два профиля. Манга постранично: облачко до 22 % страницы (плотное — до 42 %), зазор строк 0,45, автопереход страницы ВЫКЛЮЧЕН. Вебтун-лента: облачко до 34 % (плотное — до 60 %), зазор 0,6, автопереход ВКЛЮЧЁН — в ленте «страниц» внутри главы нет. Профиль берётся из раскладки книги, можно задать вручную чипами «Как есть / Манга постранично / Вебтун, лента». Конвейер распознавания остаётся один, меняются только числа.',
+      more: 'Смена типа книги не пересчитывает уже найденный текст — новые числа применяются к следующему распознаванию. Если текст после смены профиля читается не так, нажмите в шторке «Распознать заново».',
+    },
+    {
+      id: 'voice-pages-forward',
+      title: 'Голос видит текст, но листает дальше (реплика не звучит)',
+      status: 'watch', since: 'v1.9.104',
+      check: 'Нажмите ▶ на полосе, где текст видно: голос обязан прочитать всё видимое до перехода. Если полоса уехала молча — в журнале будет строка «повтор полосы: в кадре виден текст».',
+      fix: 'Пустой результат распознавания раньше сразу уходил в ФОНОВЫЙ повтор, а голос ехал дальше. Теперь, если в кадре есть краска текста, читалка ЖДЁТ один повторный проход на стоящей ленте (не дольше 3 с) и читает найденное. Если краски нет — полоса действительно пустая, проход пропускается как раньше.',
+      more: 'Осталось открытым: голос сам за границу страницы в постраничной манге по-прежнему не едет (это правило 4.11). Чтобы пройти главу целиком, включите «Дальше страницы» в правилах чтения или читайте в режиме ленты.',
+    },
+    {
       id: 'text-doubled-in-replica',
       title: 'Реплика задваивается: «МУСОР. МУСОР.», «ВАШЕ ТПРЕ- ВАШЕ ПРЕВОСХОДИТЕЛЬСТВО, Я…»',
       status: 'fixed', since: 'v1.9.103',
@@ -1294,7 +1321,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // и страница выглядит зависшей. setTimeout отдаёт главный поток браузеру.
 const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-const VERSION = 'v1.9.103';
+const VERSION = 'v1.9.104';
 
 /* Формат сохранённого текста (не версия сборки!).
    Раньше буфер распознанного текста привязывался к VERSION, и КАЖДОЕ
@@ -2343,6 +2370,13 @@ const DEFAULT_RULES = {
   rescueMinRegions: 600, pageSide: 1600, rescueSide: 960, minConfidence: 0.25,
   cutMargin: 0.06, bandOverlap: 0, bandsMax: 8, wholeThreshold: 0.72,
   bubbleGap: 0.45, mergeHeightRatio: 1.8,
+  // Потолки «облачка» — отдельно для постраничной манги и для ленты.
+  // У ленты нет страниц-кадров: облачко в ней может занимать больше
+  // кадра, и потолок 0,22 рвал его на две реплики.
+  maxBlock: 0.22, maxTight: 0.42,
+  // Тип книги: auto (по геометрии главы), page (манга постранично),
+  // strip (вебтун/манхва — непрерывная лента).
+  layoutMode: 'auto',
   speechRate: 0, autoScrollStep: 0.25, semiManual: false, semiManualSettleMs: 700,
   detRetry: true,          // повтор детектора с ImageNet-нормой, только если боксов 0
   largeText: true,         // второй проход по трудному тексту (каллиграфия, крупный шрифт)
@@ -2453,6 +2487,8 @@ function sanitizeRules(r, overrides) {
   num('minConfidence', 0, 1); num('cutMargin', 0, .4); num('bandOverlap', 0, .5);
   num('bandsMax', 1, 32); num('wholeThreshold', .3, 1); num('bubbleGap', .05, 3);
   num('mergeHeightRatio', 1.05, 6); num('speechRate', 0, 3); num('autoScrollStep', .05, .9);
+  num('maxBlock', .1, .8); num('maxTight', .1, .9);
+  R.layoutMode = (R.layoutMode === 'page' || R.layoutMode === 'strip') ? R.layoutMode : 'auto';
   num('semiManualSettleMs', 0, 5000);
   // Скорость прокрутки — отдельно от скорости голоса: это про движение ленты.
   num('scrollSpeed', .25, 2);
@@ -2484,6 +2520,54 @@ function sanitizeRules(r, overrides) {
   R.ocrEngine = (R.ocrEngine === 'native' || R.ocrEngine === 'wasm') ? R.ocrEngine : 'auto';
   R.frames = R.frames !== false;
   return R;
+}
+
+/*
+ * ПРОФИЛИ РАСКЛАДКИ: манга постранично и вебтун-лента — разные книги.
+ *
+ * Просьба с телефона 07.11: «для каждого типа манга либо вебтун свои изменения
+ * под каждый, чинить отдельно, со своими настройками». Правила чтения одни и
+ * те же, но ЧИСЛА у них разные, и это не косметика:
+ *
+ *   · постраничная манга — кадр конечен, облачко редко выше 22 % страницы.
+ *     Автопереход на следующую страницу по умолчанию ВЫКЛЮЧЕН: за границу
+ *     страницы голос едет только по ▶ (жалоба 4.11 «голос уехал сам»).
+ *   · вебтун — кадр бесконечный, облачко бывает выше 22 %, а «страниц» внутри
+ *     главы нет: реплики идут непрерывно, автопереход обязан быть включён.
+ *
+ * Какой профиль взять: RULES.layoutMode ('auto' — по раскладке читалки,
+ * 'page'/'strip' — выставлено человеком в настройках). Тип манги при этом
+ * только ВЫБИРАЕТ числа, сам конвейер распознавания остаётся один — иначе
+ * пришлось бы держать две копии движка.
+ */
+const LAYOUT_PROFILES = {
+  page: {
+    maxBlock: 0.22,          // облачко выше 22 % страницы — это абзац/колонка
+    maxTight: 0.42,          // плотное облачко, но не выше 42 %
+    bubbleGap: 0.45,         // зазор между строками одного облачка
+    mergeHeightRatio: 1.8,   // строки одной высоты — одна реплика
+    autoPage: false,         // за границу страницы — только по ▶
+  },
+  strip: {
+    maxBlock: 0.34,
+    maxTight: 0.60,          // в ленте облачко на пол-кадра — норма
+    bubbleGap: 0.60,
+    mergeHeightRatio: 2.2,
+    autoPage: true,          // в ленте «страниц» нет: голос едет дальше сам
+  },
+};
+
+/** Тип книги по текущим правилам и раскладке читалки. */
+function layoutKindOf(R, isStrip) {
+  const mode = (R && R.layoutMode) || 'auto';
+  if (mode === 'page' || mode === 'strip') return mode;
+  return isStrip ? 'strip' : 'page';
+}
+
+/** Правила с числами выбранного профиля (сам RULES не меняем). */
+function rulesWithProfile(R, kind) {
+  const p = LAYOUT_PROFILES[kind] || LAYOUT_PROFILES.page;
+  return { ...R, ...p, layoutKind: kind };
 }
 
 /* ───────────────────────── 4b. Починка текста (порт KomaText.kt) ─────────────────────────
@@ -7325,8 +7409,11 @@ function bubblesOf(group, rtl, R) {
   // одна «реплика» на 75 слов. Для манги правило безвредно: облачко редко выше
   // четверти страницы, а если и выше — его строки идут плотно, и разрез по
   // самому большому пробелу всё равно придётся на пустое место.
-  const MAX_BLOCK = 0.22;                      // доля высоты страницы
-  const MAX_TIGHT = 0.42;                      // плотное облачко — до 42 %
+  // Потолки берутся из профиля раскладки: у ленты облачко бывает выше, чем
+  // у страницы манги (см. LAYOUT_PROFILES). Раньше здесь стояли числа 0,22/0,42
+  // намертво — и в вебтуне высокое облачко рвалось на две реплики.
+  const MAX_BLOCK = Number(R.maxBlock) || 0.22;   // доля высоты страницы
+  const MAX_TIGHT = Number(R.maxTight) || 0.42;   // плотное облачко
   const splitTall = (block) => {
     if (block.length < 4) return [block];
     const span = (b) => Math.max(...b.map(r => r.bottom)) - Math.min(...b.map(r => r.top));
@@ -9297,6 +9384,44 @@ const Reader = {
    * лента кончилась целиком, и это «Глава дочитана».
    */
   isStrip() { return this.mode === 'vertical'; },
+  /**
+   * Правила распознавания с числами профиля раскладки (манга / вебтун).
+   *
+   * Просьба с телефона 07.11: «для каждого типа манга либо вебтун свои
+   * изменения, со своими настройками». Разные числа — разный смысл кадра:
+   * у ленты нет конечной страницы, поэтому облачко бывает выше и автопереход
+   * обязателен; у постраничной манги наоборот. Конвейер один, числа разные.
+   */
+  scanRules() {
+    try {
+      const kind = layoutKindOf(RULES, this.mode === 'vertical');
+      return rulesWithProfile(RULES, kind);
+    } catch (e) { return RULES; }
+  },
+  /**
+   * В видимой полосе есть краска текста?
+   *
+   * Нужно, чтобы отличить «полоса пустая — идём дальше» от «текст видно, но
+   * распознавание недосмотрело». Жалоба 07.11: «видит текст, но листает
+   * дальше» — голос уезжал на следующую полосу/страницу ровно в этом случае.
+   */
+  paintInBand(i) {
+    try {
+      const c = this.canvases[i];
+      const band = this.visibleBandPx(i);
+      const ink = this.inkRows(i);
+      if (!c || !band || !ink || !ink.dark || !c.height) return false;
+      const row = (px) => clamp(Math.round(px / c.height * ink.h), 0, ink.h - 1);
+      const a = row(band.y0), b = row(band.y1);
+      let dark = 0, total = 0;
+      for (let r = a; r <= b; r++) { total++; if (ink.dark[r] < 200) dark++; }
+      return total > 0 && dark / total >= 0.12;
+    } catch (e) { return false; }
+  },
+  /** Тип книги словами — для настроек и журнала. */
+  layoutKind() {
+    try { return layoutKindOf(RULES, this.mode === 'vertical'); } catch (e) { return 'page'; }
+  },
   visibleBandPx(i) {
     try { return this.visibleBandPxInner(i); } catch (e) { return null; }
   },
@@ -9593,7 +9718,8 @@ const Reader = {
       // Рамки найденного рисуем ДО распознавания (см. paintPendingFrames).
       const prevOnBoxes = RULES.onBoxes;
       RULES.onBoxes = (boxes) => { try { this.paintPendingFrames(i, boxes); } catch (e) {} };
-      const res = await recognizePage(c, RULES, (done, total, phase) => {
+      const SR = this.scanRules();
+      const res = await recognizePage(c, SR, (done, total, phase) => {
         // Числа проверяем: раньше сюда мог прийти текст фазы вместо числа, и в
         // бейдже висело «Распознаём… NaN/0» (телефон 22:41).
         const okDone = Number.isFinite(done), okTotal = Number.isFinite(total) && total > 0;
@@ -11397,6 +11523,22 @@ const TTS = {
       toast('На этой полосе нет распознанного текста — прокрутите к репликам', 4000, true);
       return;
     }
+    // ── Явное ▶ = «читай с начала полосы» ─────────────────────────────────
+    // Раньше отметки «прочитано» переживали повторное нажатие ▶: очередь
+    // оказывалась пустой (всё уже сказано в прошлый раз), и читалка молча
+    // ехала дальше — человек видел текст на экране, а голос листал
+    // (жалоба 07.11: «видит текст, но листает дальше»). Теперь по ▶ видимые
+    // реплики снова считаются непрочитанными. Только видимые: остальная
+    // глава и другие страницы отметок не теряют.
+    if (fromStart && lines.length) {
+      for (const l of lines) {
+        const idx = Reader.lineIdx(i, l);
+        Reader.spoken.delete(Reader.spokenKey(i, l.text, idx >= 0 ? idx : undefined));
+        Reader.spoken.delete(Reader.spokenKey(i, l.text));
+      }
+      Reader.spokenDirty = true;
+      try { Reader.paintPage(i); } catch (e) { /* подсветка — не повод молчать */ }
+    }
     this.queue = lines.slice();          // только непрочитанное на этой полосе
     this.stopped = false; this.idx = 0;
     this._softAgain = 0;                 // новый запуск — снова есть право на повтор
@@ -11597,6 +11739,26 @@ const TTS = {
             // Теперь: полосу пропускаем сразу, а повторный проход запускаем
             // следом, тихо, не блокируя следующую реплику. И только когда
             // очередь чтения действительно пуста.
+            // ── Есть краска в кадре — ждём, а не листаем ─────────────────
+            // Голос не имеет права уйти вперёд, если на экране виден текст:
+            // человек видит облачко, а голос «листает дальше» (жалоба 07.11).
+            // Раньше любой пустой результат сразу уходил в ФОНОВЫЙ ретрай, и
+            // следующая реплика начиналась без этой. Теперь: если в полосе
+            // есть краска, ждём ОДИН повторный проход на стоящей ленте (не
+            // дольше 3 с). Краски нет — полоса действительно пустая, идём
+            // дальше сразу, как и было.
+            if (this.paintInBand(page)) {
+              try {
+                const b2 = Reader.visibleBandPx(page);
+                await Promise.race([
+                  Reader.scanPage(page, { bandPx: b2, force: true, silent: true, internal: true,
+                    tag: 'повтор полосы: в кадре виден текст' }).catch(() => {}),
+                  sleep(3000),
+                ]);
+                un = Reader.unspokenInBand();
+                if (un.length) return this.readQueue(un);
+              } catch (e) { /* не смогли — идём прежним путём */ }
+            }
             this._bgRetry = this._bgRetry || new Set();
             const retryKey = page + ':' + ni;
             if (!this._bgRetry.has(retryKey) && (!this.queue || this.idx >= (this.queue || []).length)) {
@@ -13390,6 +13552,28 @@ function bindUI() {
     Reader.modeUser = true;
     await DB.put('books', Reader.book);
   };
+  // ── Тип книги: свои числа для манги и для ленты ─────────────────────────
+  // Просьба с телефона 07.11: «для каждого типа манга либо вебтун свои
+  // изменения под каждый, со своими настройками». Числа профиля применяются
+  // при СЛЕДУЮЩЕМ распознавании — уже найденный текст не пересчитывается
+  // (иначе правка типа книги молча меняла бы прочитанное).
+  if ($('#layoutChips')) {
+    $('#layoutChips').onclick = async (e) => {
+      const btn = e.target.closest('.chip');
+      if (!btn) return;
+      const mode = btn.dataset.layout || 'auto';
+      RULES.layoutMode = (mode === 'page' || mode === 'strip') ? mode : 'auto';
+      $$('#layoutChips .chip').forEach(c => c.classList.toggle('on', (c.dataset.layout || 'auto') === RULES.layoutMode));
+      await saveRules();
+      const kind = Reader.layoutKind();
+      toast(RULES.layoutMode === 'auto'
+        ? 'Тип книги: как есть — по раскладке (сейчас ' + (kind === 'strip' ? 'лента' : 'страницы') + ')'
+        : 'Тип книги: ' + (RULES.layoutMode === 'strip' ? 'вебтун, лента' : 'манга постранично')
+          + '. Новые числа применятся к следующему распознаванию', 5000, true);
+    };
+  }
+  syncLayoutChips();
+
   $('#modeChips').onclick = async (e) => {
     const chip = e.target.closest('.chip'); if (!chip) return;
     Reader.mode = chip.dataset.mode;
@@ -13406,6 +13590,22 @@ function bindUI() {
     Reader.rescanInDir();
     syncSettingsUI();
   };
+  // ── Идти по главе дальше сам ────────────────────────────────────────────
+  // Прямая просьба 07.11: «я собирался протестировать все страницы сразу
+  // озвучить». Раньше такой галочки не было вовсе: в постраничной манге голос
+  // после страницы останавливался, и пройти главу целиком было нельзя.
+  // Правило 4.11 («сам за границу страницы не едет») остаётся по умолчанию:
+  // галочка ВЫКЛЮЧЕНА, пока человек её сам не поставит.
+  if ($('#cbAutoPage')) {
+    $('#cbAutoPage').checked = !!RULES.autoPage;
+    $('#cbAutoPage').onchange = async (e) => {
+      RULES.autoPage = !!e.target.checked;
+      await saveRules();
+      toast(RULES.autoPage
+        ? 'Читаю главу целиком: после страницы голос сам идёт на следующую'
+        : 'После страницы остановлюсь: ▶ — следующая', 4000);
+    };
+  }
   if ($('#cbVoiceBook')) $('#cbVoiceBook').onchange = async (e) => {
     Reader.voiceOn = !!e.target.checked;
     await saveProfile({ voice: Reader.voiceOn });
@@ -13705,8 +13905,26 @@ function renderEngHint() {
     + ' она мерит на твоей странице.';
 }
 
+/** Подсветить выбранный тип книги и подписать, что получилось по факту. */
+function syncLayoutChips() {
+  const chips = $$('#layoutChips .chip');
+  if (!chips.length) return;
+  const mode = RULES.layoutMode || 'auto';
+  chips.forEach(c => c.classList.toggle('on', (c.dataset.layout || 'auto') === mode));
+  const hint = $('#layoutHint');
+  if (hint) {
+    const kind = (typeof Reader !== 'undefined' && Reader.layoutKind) ? Reader.layoutKind() : 'page';
+    hint.textContent = mode === 'auto'
+      ? 'Сейчас книга раскрыта как ' + (kind === 'strip' ? 'лента (вебтун)' : 'страницы (манга)')
+        + ' — числа этого профиля и применяются.'
+      : 'Выбрано вручную: ' + (mode === 'strip' ? 'вебтун, лента' : 'манга постранично')
+        + '. Раскладка сейчас: ' + (kind === 'strip' ? 'лента' : 'страницы') + '.';
+  }
+}
+
 function syncSettingsUI() {
   $$('#modeChips .chip').forEach(c => c.classList.toggle('on', c.dataset.mode === Reader.mode));
+  syncLayoutChips();
   $$('#speedChips .chip').forEach(c => c.classList.toggle('on', c.dataset.speed === RULES.speed));
   const hint = $('#speedHint');
   if (hint) {
@@ -13731,6 +13949,7 @@ function syncSettingsUI() {
     const cvd = $('#cbVoiceDefault'); if (cvd) cvd.checked = !!D.voice;
   }
   const cvb = $('#cbVoiceBook'); if (cvb) cvb.checked = !!Reader.voiceOn;
+  const cap = $('#cbAutoPage'); if (cap) cap.checked = !!RULES.autoPage;
   $$('#engChips .chip').forEach(c => c.classList.toggle('on', c.dataset.eng === (Reader.engine || 'auto')));
   $$('#defEngChips .chip').forEach(c => c.classList.toggle('on', c.dataset.eng === ((D && D.engine) || 'auto')));
   if (typeof renderEngHint === 'function') renderEngHint();

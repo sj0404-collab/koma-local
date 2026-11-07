@@ -791,15 +791,26 @@
          Раньше был один набор, и приходилось гадать, к чему он относится. -->
     <div class="lbl" style="margin-top:8px">ЭТА КНИГА <span id="profState" class="hint"></span></div>
     <div class="chips" id="modeChips">
-      <button class="chip" data-mode="vertical">Лента · листаю сам, без голоса</button>
+      <button class="chip" data-mode="vertical">Лента · вебтун, непрерывно</button>
       <button class="chip" data-mode="rtl">Страницы справа налево · манга</button>
       <button class="chip" data-mode="ltr">Страницы слева направо · комикс</button>
     </div>
+    <div class="lbl" style="margin-top:14px">ТИП КНИГИ (свои числа для манги и для ленты)</div>
+    <div class="chips" id="layoutChips">
+      <button class="chip" data-layout="auto">Как есть — по раскладке</button>
+      <button class="chip" data-layout="page">Манга постранично</button>
+      <button class="chip" data-layout="strip">Вебтун, лента</button>
+    </div>
+    <div class="hint" id="layoutHint" style="margin-top:6px">У манги облачко считается по странице и голос сам за границу страницы не едет. У вебтуна страниц нет: облачко бывает выше, и голос идёт по ленте дальше сам.</div>
     <div class="lbl" style="margin-top:14px">НАЧАЛО ЧТЕНИЯ ДЛЯ ЭТОЙ КНИГИ</div>
     <div class="chips" id="dirChips">
       <button class="chip" data-dir="rtl">Справа налево (манга)</button>
       <button class="chip" data-dir="ltr">Слева направо (комикс)</button>
     </div>
+    <label class="row" style="justify-content:space-between;padding:8px 0 2px">
+      <span>Идти по главе дальше сам <span class="hint">(следующая страница без ▶)</span></span>
+      <input type="checkbox" id="cbAutoPage">
+    </label>
     <label class="row" style="justify-content:space-between;padding:8px 0 2px">
       <span>Голос у этой книги</span>
       <input type="checkbox" id="cbVoiceBook">

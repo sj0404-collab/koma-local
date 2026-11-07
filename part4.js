@@ -807,6 +807,44 @@ const Reader = {
    * лента кончилась целиком, и это «Глава дочитана».
    */
   isStrip() { return this.mode === 'vertical'; },
+  /**
+   * Правила распознавания с числами профиля раскладки (манга / вебтун).
+   *
+   * Просьба с телефона 07.11: «для каждого типа манга либо вебтун свои
+   * изменения, со своими настройками». Разные числа — разный смысл кадра:
+   * у ленты нет конечной страницы, поэтому облачко бывает выше и автопереход
+   * обязателен; у постраничной манги наоборот. Конвейер один, числа разные.
+   */
+  scanRules() {
+    try {
+      const kind = layoutKindOf(RULES, this.mode === 'vertical');
+      return rulesWithProfile(RULES, kind);
+    } catch (e) { return RULES; }
+  },
+  /**
+   * В видимой полосе есть краска текста?
+   *
+   * Нужно, чтобы отличить «полоса пустая — идём дальше» от «текст видно, но
+   * распознавание недосмотрело». Жалоба 07.11: «видит текст, но листает
+   * дальше» — голос уезжал на следующую полосу/страницу ровно в этом случае.
+   */
+  paintInBand(i) {
+    try {
+      const c = this.canvases[i];
+      const band = this.visibleBandPx(i);
+      const ink = this.inkRows(i);
+      if (!c || !band || !ink || !ink.dark || !c.height) return false;
+      const row = (px) => clamp(Math.round(px / c.height * ink.h), 0, ink.h - 1);
+      const a = row(band.y0), b = row(band.y1);
+      let dark = 0, total = 0;
+      for (let r = a; r <= b; r++) { total++; if (ink.dark[r] < 200) dark++; }
+      return total > 0 && dark / total >= 0.12;
+    } catch (e) { return false; }
+  },
+  /** Тип книги словами — для настроек и журнала. */
+  layoutKind() {
+    try { return layoutKindOf(RULES, this.mode === 'vertical'); } catch (e) { return 'page'; }
+  },
   visibleBandPx(i) {
     try { return this.visibleBandPxInner(i); } catch (e) { return null; }
   },
@@ -1103,7 +1141,8 @@ const Reader = {
       // Рамки найденного рисуем ДО распознавания (см. paintPendingFrames).
       const prevOnBoxes = RULES.onBoxes;
       RULES.onBoxes = (boxes) => { try { this.paintPendingFrames(i, boxes); } catch (e) {} };
-      const res = await recognizePage(c, RULES, (done, total, phase) => {
+      const SR = this.scanRules();
+      const res = await recognizePage(c, SR, (done, total, phase) => {
         // Числа проверяем: раньше сюда мог прийти текст фазы вместо числа, и в
         // бейдже висело «Распознаём… NaN/0» (телефон 22:41).
         const okDone = Number.isFinite(done), okTotal = Number.isFinite(total) && total > 0;
@@ -2907,6 +2946,22 @@ const TTS = {
       toast('На этой полосе нет распознанного текста — прокрутите к репликам', 4000, true);
       return;
     }
+    // ── Явное ▶ = «читай с начала полосы» ─────────────────────────────────
+    // Раньше отметки «прочитано» переживали повторное нажатие ▶: очередь
+    // оказывалась пустой (всё уже сказано в прошлый раз), и читалка молча
+    // ехала дальше — человек видел текст на экране, а голос листал
+    // (жалоба 07.11: «видит текст, но листает дальше»). Теперь по ▶ видимые
+    // реплики снова считаются непрочитанными. Только видимые: остальная
+    // глава и другие страницы отметок не теряют.
+    if (fromStart && lines.length) {
+      for (const l of lines) {
+        const idx = Reader.lineIdx(i, l);
+        Reader.spoken.delete(Reader.spokenKey(i, l.text, idx >= 0 ? idx : undefined));
+        Reader.spoken.delete(Reader.spokenKey(i, l.text));
+      }
+      Reader.spokenDirty = true;
+      try { Reader.paintPage(i); } catch (e) { /* подсветка — не повод молчать */ }
+    }
     this.queue = lines.slice();          // только непрочитанное на этой полосе
     this.stopped = false; this.idx = 0;
     this._softAgain = 0;                 // новый запуск — снова есть право на повтор
@@ -3107,6 +3162,26 @@ const TTS = {
             // Теперь: полосу пропускаем сразу, а повторный проход запускаем
             // следом, тихо, не блокируя следующую реплику. И только когда
             // очередь чтения действительно пуста.
+            // ── Есть краска в кадре — ждём, а не листаем ─────────────────
+            // Голос не имеет права уйти вперёд, если на экране виден текст:
+            // человек видит облачко, а голос «листает дальше» (жалоба 07.11).
+            // Раньше любой пустой результат сразу уходил в ФОНОВЫЙ ретрай, и
+            // следующая реплика начиналась без этой. Теперь: если в полосе
+            // есть краска, ждём ОДИН повторный проход на стоящей ленте (не
+            // дольше 3 с). Краски нет — полоса действительно пустая, идём
+            // дальше сразу, как и было.
+            if (this.paintInBand(page)) {
+              try {
+                const b2 = Reader.visibleBandPx(page);
+                await Promise.race([
+                  Reader.scanPage(page, { bandPx: b2, force: true, silent: true, internal: true,
+                    tag: 'повтор полосы: в кадре виден текст' }).catch(() => {}),
+                  sleep(3000),
+                ]);
+                un = Reader.unspokenInBand();
+                if (un.length) return this.readQueue(un);
+              } catch (e) { /* не смогли — идём прежним путём */ }
+            }
             this._bgRetry = this._bgRetry || new Set();
             const retryKey = page + ':' + ni;
             if (!this._bgRetry.has(retryKey) && (!this.queue || this.idx >= (this.queue || []).length)) {

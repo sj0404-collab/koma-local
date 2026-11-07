@@ -684,6 +684,28 @@ function bindUI() {
     Reader.modeUser = true;
     await DB.put('books', Reader.book);
   };
+  // ── Тип книги: свои числа для манги и для ленты ─────────────────────────
+  // Просьба с телефона 07.11: «для каждого типа манга либо вебтун свои
+  // изменения под каждый, со своими настройками». Числа профиля применяются
+  // при СЛЕДУЮЩЕМ распознавании — уже найденный текст не пересчитывается
+  // (иначе правка типа книги молча меняла бы прочитанное).
+  if ($('#layoutChips')) {
+    $('#layoutChips').onclick = async (e) => {
+      const btn = e.target.closest('.chip');
+      if (!btn) return;
+      const mode = btn.dataset.layout || 'auto';
+      RULES.layoutMode = (mode === 'page' || mode === 'strip') ? mode : 'auto';
+      $$('#layoutChips .chip').forEach(c => c.classList.toggle('on', (c.dataset.layout || 'auto') === RULES.layoutMode));
+      await saveRules();
+      const kind = Reader.layoutKind();
+      toast(RULES.layoutMode === 'auto'
+        ? 'Тип книги: как есть — по раскладке (сейчас ' + (kind === 'strip' ? 'лента' : 'страницы') + ')'
+        : 'Тип книги: ' + (RULES.layoutMode === 'strip' ? 'вебтун, лента' : 'манга постранично')
+          + '. Новые числа применятся к следующему распознаванию', 5000, true);
+    };
+  }
+  syncLayoutChips();
+
   $('#modeChips').onclick = async (e) => {
     const chip = e.target.closest('.chip'); if (!chip) return;
     Reader.mode = chip.dataset.mode;
@@ -700,6 +722,22 @@ function bindUI() {
     Reader.rescanInDir();
     syncSettingsUI();
   };
+  // ── Идти по главе дальше сам ────────────────────────────────────────────
+  // Прямая просьба 07.11: «я собирался протестировать все страницы сразу
+  // озвучить». Раньше такой галочки не было вовсе: в постраничной манге голос
+  // после страницы останавливался, и пройти главу целиком было нельзя.
+  // Правило 4.11 («сам за границу страницы не едет») остаётся по умолчанию:
+  // галочка ВЫКЛЮЧЕНА, пока человек её сам не поставит.
+  if ($('#cbAutoPage')) {
+    $('#cbAutoPage').checked = !!RULES.autoPage;
+    $('#cbAutoPage').onchange = async (e) => {
+      RULES.autoPage = !!e.target.checked;
+      await saveRules();
+      toast(RULES.autoPage
+        ? 'Читаю главу целиком: после страницы голос сам идёт на следующую'
+        : 'После страницы остановлюсь: ▶ — следующая', 4000);
+    };
+  }
   if ($('#cbVoiceBook')) $('#cbVoiceBook').onchange = async (e) => {
     Reader.voiceOn = !!e.target.checked;
     await saveProfile({ voice: Reader.voiceOn });
@@ -999,8 +1037,26 @@ function renderEngHint() {
     + ' она мерит на твоей странице.';
 }
 
+/** Подсветить выбранный тип книги и подписать, что получилось по факту. */
+function syncLayoutChips() {
+  const chips = $$('#layoutChips .chip');
+  if (!chips.length) return;
+  const mode = RULES.layoutMode || 'auto';
+  chips.forEach(c => c.classList.toggle('on', (c.dataset.layout || 'auto') === mode));
+  const hint = $('#layoutHint');
+  if (hint) {
+    const kind = (typeof Reader !== 'undefined' && Reader.layoutKind) ? Reader.layoutKind() : 'page';
+    hint.textContent = mode === 'auto'
+      ? 'Сейчас книга раскрыта как ' + (kind === 'strip' ? 'лента (вебтун)' : 'страницы (манга)')
+        + ' — числа этого профиля и применяются.'
+      : 'Выбрано вручную: ' + (mode === 'strip' ? 'вебтун, лента' : 'манга постранично')
+        + '. Раскладка сейчас: ' + (kind === 'strip' ? 'лента' : 'страницы') + '.';
+  }
+}
+
 function syncSettingsUI() {
   $$('#modeChips .chip').forEach(c => c.classList.toggle('on', c.dataset.mode === Reader.mode));
+  syncLayoutChips();
   $$('#speedChips .chip').forEach(c => c.classList.toggle('on', c.dataset.speed === RULES.speed));
   const hint = $('#speedHint');
   if (hint) {
@@ -1025,6 +1081,7 @@ function syncSettingsUI() {
     const cvd = $('#cbVoiceDefault'); if (cvd) cvd.checked = !!D.voice;
   }
   const cvb = $('#cbVoiceBook'); if (cvb) cvb.checked = !!Reader.voiceOn;
+  const cap = $('#cbAutoPage'); if (cap) cap.checked = !!RULES.autoPage;
   $$('#engChips .chip').forEach(c => c.classList.toggle('on', c.dataset.eng === (Reader.engine || 'auto')));
   $$('#defEngChips .chip').forEach(c => c.classList.toggle('on', c.dataset.eng === ((D && D.engine) || 'auto')));
   if (typeof renderEngHint === 'function') renderEngHint();
