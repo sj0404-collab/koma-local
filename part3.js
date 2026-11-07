@@ -4841,6 +4841,52 @@ function joinBrokenWord(text, next) {
   return Words.isKnown(cand) || Words.isPlausible(cand);
 }
 
+/**
+ * Строки одного облачка из найденных частей.
+ *
+ * Части, стоящие РЯДОМ по горизонтали на одной высоте, — одна строка. Части,
+ * стоящие ДРУГ ПОД ДРУГОМ, — разные строки, даже если их рамки перекрываются
+ * по вертикали: у каллиграфии с наклоном и выносными элементами соседние
+ * строки всегда немного перекрываются.
+ *
+ * Из-за отсутствия этой проверки титул «Как прожить / жизнь, будучи старшей /
+ * сестрой тирана» читался «Как прожить сестрой тирана. жизнь будучи старшей»:
+ * третья строка стояла в одной «строке» со второй, а внутри строки манга
+ * читается справа налево (телефон 07.11, 09:21).
+ */
+function buildRows(block, rtl) {
+  const rows = [];
+  for (const part of block.slice().sort((a, b) => a.top - b.top)) {
+    const h = Math.max(part.bottom - part.top, 1e-6);
+    const w = Math.max(part.right - part.left, 1e-6);
+    const row = rows.find((r) => {
+      const oy = Math.min(r.bottom, part.bottom) - Math.max(r.top, part.top);
+      if (oy <= Math.min(h, r.height) * 0.5) return false;
+      // Почти полное совпадение по горизонтали — это следующая строка,
+      // а не продолжение этой.
+      const ox = Math.min(r.right, part.right) - Math.max(r.left, part.left);
+      const wMin = Math.min(w, r.width);
+      return !(wMin > 0 && ox > wMin * 0.6);
+    });
+    if (row) {
+      row.parts.push(part);
+      row.top = Math.min(row.top, part.top);
+      row.bottom = Math.max(row.bottom, part.bottom);
+      row.left = Math.min(row.left, part.left);
+      row.right = Math.max(row.right, part.right);
+      row.height = row.bottom - row.top;
+      row.width = row.right - row.left;
+    } else {
+      rows.push({ top: part.top, bottom: part.bottom, height: h,
+        left: part.left, right: part.right, width: w, parts: [part] });
+    }
+  }
+  rows.sort((a, b) => a.top - b.top);
+  // Внутри строки — справа налево для манги, слева направо для комикса.
+  for (const r of rows) r.parts.sort((a, b) => (rtl ? b.left - a.left : a.left - b.left));
+  return rows;
+}
+
 function bubblesOf(group, rtl, R) {
   const bubbleGap = R.bubbleGap;
   if (!group.length) return [];
@@ -4937,22 +4983,8 @@ function bubblesOf(group, rtl, R) {
     // корявыми, часть пропадала, а часть читалась дважды (телефон 22:42).
     // Внутри ОДНОЙ строки (несколько кусков на одной высоте) — по-прежнему
     // справа налево: так читается сама строка.
-    const rows = [];
-    for (const part of block.slice().sort((a, b) => a.top - b.top)) {
-      const h = Math.max(part.bottom - part.top, 1e-6);
-      const row = rows.find(r => Math.min(r.bottom, part.bottom) - Math.max(r.top, part.top)
-        > Math.min(h, r.height) * 0.5);
-      if (row) {
-        row.parts.push(part);
-        row.top = Math.min(row.top, part.top);
-        row.bottom = Math.max(row.bottom, part.bottom);
-        row.height = row.bottom - row.top;
-      } else {
-        rows.push({ top: part.top, bottom: part.bottom, height: h, parts: [part] });
-      }
-    }
-    rows.sort((a, b) => a.top - b.top);
-    const ordered = rows.flatMap(r => r.parts.sort((a, b) => rtl ? b.left - a.left : a.left - b.left));
+    const rows = buildRows(block, rtl);
+    const ordered = rows.flatMap(r => r.parts);
     // Склейка частей одной строки ровно как в KomaAutoRead:
     //   «ВЫСО-» + «ЧЕСТВО» → без пробела и без дефиса;
     //   обрывок в 1-2 буквы после буквы → тоже без пробела.
