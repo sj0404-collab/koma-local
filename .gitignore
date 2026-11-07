@@ -9,3 +9,5 @@ __pycache__/
 # PWA: собирается в CI (build.sh) из тех же частей и моделей АПК
 pwa/index.html
 pwa/models/
+
+__img/
